@@ -63,6 +63,9 @@
             }
         ],
         "enable_communication": true,
+        "packet_loss_prob": 0.1,
+        "comm_range": 50.0,
+        "sensor_noise_std": 0.05,
         "sensors": [
             "position",
             "velocity",

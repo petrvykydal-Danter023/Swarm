@@ -21,6 +21,7 @@ import sys
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from universal_env import UniversalSwarmEnv, make_env
+from models.swarm_wrapper import SwarmVecEnv, ParallelSwarmVecEnv
 
 
 class SwarmRewardCallback(BaseCallback):
@@ -197,8 +198,15 @@ def train_task(config: dict) -> dict:
         print(f"  🔧 Device: {device}")
     
     try:
-        # Create vectorized environment using SB3's DummyVecEnv
-        env = DummyVecEnv([make_flattened_env(config) for _ in range(n_envs)])
+        # Create vectorized environment using IPPO Architecture (Decentralized)
+        # Use ParallelSwarmVecEnv to run multiple swarms (M) * agents (N)
+        def _make_unique_env():
+             return UniversalSwarmEnv(config)
+
+        if n_envs > 1:
+            env = ParallelSwarmVecEnv(_make_unique_env, n_envs)
+        else:
+            env = SwarmVecEnv(_make_unique_env())
         
         # Create or load PPO model
         if load_pretrained_path and Path(load_pretrained_path).exists():
@@ -247,26 +255,28 @@ def train_task(config: dict) -> dict:
         
         # Evaluation and GIF generation
         print("Generating evaluation video...")
-        eval_env = FlattenedSwarmEnv(config)
+        # Use single SwarmVecEnv for eval
+        eval_env_inner = UniversalSwarmEnv(config)
+        eval_env = SwarmVecEnv(eval_env_inner)
         
         frames = []
-        obs, info = eval_env.reset()
+        obs = eval_env.reset()
         max_eval_steps = config.get("training_params", {}).get("max_episode_steps", 500)
-        total_reward = 0.0
+        total_eval_mean_reward = 0.0
         
         for step in range(max_eval_steps):
             # Get action from trained model
             action, _ = model.predict(obs, deterministic=True)
             
-            # Step environment
-            obs, reward, terminated, truncated, info = eval_env.step(action)
-            total_reward += reward
+            # Step environment (VecEnv API)
+            obs, rewards, dones, infos = eval_env.step(action)
+            total_eval_mean_reward += np.mean(rewards)
             
             # Render and save frame
             frame = eval_env.render()
             frames.append(frame)
             
-            if terminated or truncated:
+            if any(dones):
                 break
         
         eval_env.close()
@@ -291,7 +301,7 @@ def train_task(config: dict) -> dict:
             "model_path": str(save_model_path) if save_model_path else None,
             "metrics": {
                 "mean_reward": float(mean_episode_reward),
-                "eval_reward": float(total_reward),
+                "eval_reward": float(total_eval_mean_reward),
                 "eval_steps": len(frames),
                 "episodes": callback.episodes_count,
                 "total_timesteps": total_timesteps,

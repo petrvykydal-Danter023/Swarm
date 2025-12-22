@@ -13,10 +13,19 @@ config = {
     "env_params": {
         "world_width": 50,
         "world_height": 50,
-        "num_agents": 3,
+        "num_agents": 5,
         "action_repeat": 4,
         "physics": {},
-        "special_objects": [{"type": "goal", "x": 45, "y": 45}]
+        "special_objects": [
+            {"type": "goal", "x": 45, "y": 45},
+            {"type": "obstacle", "x": 25, "y": 25, "radius": 5.0},
+            {"type": "obstacle", "x": 10, "y": 40, "radius": 3.0},
+            {"type": "obstacle", "x": 40, "y": 10, "radius": 3.0}
+        ],
+        "enable_communication": True,
+        "packet_loss_prob": 0.1,
+        "comm_range": 50.0,
+        "sensor_noise_std": 0.05,
     },
     "reward_code": """
 goal = env_state['goals'][0] if env_state['goals'] else None
@@ -26,8 +35,8 @@ if goal:
     reward = -math.sqrt(dx*dx + dy*dy) / 100.0
 """,
     "training_params": {
-        "total_timesteps": 500,
-        "max_episode_steps": 100
+        "total_timesteps": 600000, # Approx 10 mins training
+        "max_episode_steps": 500
     }
 }
 

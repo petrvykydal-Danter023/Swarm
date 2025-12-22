@@ -7,94 +7,83 @@ sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "../..")
 from models.rl_trainer import train_task
 
 config = {
-    "task_name": "bridge_test",
-    "description": "Agents form a human bridge across a gap",
+    "task_name": "topdown_move_test",
+    "description": "Top-down navigation test - no gaps, just obstacles and goal",
     "observation_type": "spatial",
-    "action_space_type": "discrete",  # discrete with grab action
+    "action_space_type": "discrete",
     "env_params": {
         "world_width": 100,
         "world_height": 50,
-        "num_agents": 12,
+        "num_agents": 5,  # Fewer agents for clearer visualization
         "physics": {
-            "gravity_y": 1.5,  # Gravity pulling down
-            "friction": 0.25,
+            "gravity_y": 0.0,  # TOP-DOWN: No gravity
+            "friction": 0.1,   # Low friction for easy movement
             "time_step": 0.1
         },
+        "spawn_zone": {
+            "x1": 5, "x2": 20,
+            "y1": 5, "y2": 45
+        },
+        "enable_communication": True,
+        "sensor_noise_std": 0.05,
+        "packet_loss_prob": 0.1,
+        "comm_range": 60.0,
         "special_objects": [
-            {"type": "gap", "x1": 40, "x2": 60, "y": 25},
+            # NO GAP - Pure movement test
+            {"type": "obstacle", "x": 40, "y": 25, "radius": 5},
+            {"type": "obstacle", "x": 60, "y": 15, "radius": 4},
+            {"type": "obstacle", "x": 60, "y": 35, "radius": 4},
             {"type": "goal", "x": 90, "y": 25}
+        ],
+        "sensors": [
+            "position", "velocity", "goal_vector", "obstacle_radar",
+            "neighbor_vectors", "neighbor_signals", "grabbing_state", "energy"
         ]
     },
     "reward_code": """
-# Bridge building reward - form chain across gap
+# Pure Navigation Reward
 reward = 0.0
+agent_idx = env_state['agent_idx']
+agent = env_state['agents'][agent_idx]
 
-# Find gap
-gap = None
-for obj in env_state.get('gaps', []):
-    gap = obj
-    break
+# 1. Distance to Goal (Dense Reward)
+if env_state['goals']:
+    goal = env_state['goals'][0]
+    dist = math.sqrt((goal['x']-agent['x'])**2 + (goal['y']-agent['y'])**2)
+    
+    # Normalized distance reward (0 to 1)
+    max_dist = 100.0
+    reward += (1.0 - min(dist, max_dist) / max_dist) * 0.1
+    
+    # Goal Reached Bonus
+    if dist < 3.0:
+        reward += 10.0
 
-if gap:
-    gap_x1, gap_x2 = gap['x1'], gap['x2']
-    gap_y = gap['y']
-    gap_center = (gap_x1 + gap_x2) / 2
-    
-    # Check if agent is in gap zone
-    in_gap = gap_x1 <= agent['x'] <= gap_x2
-    near_gap = gap_x1 - 10 <= agent['x'] <= gap_x2 + 10
-    
-    # Reward for being near gap level (not falling)
-    height_diff = abs(agent['y'] - gap_y)
-    if height_diff < 3:
-        reward += 1.0
-    elif height_diff < 10:
-        reward += 0.3
-    
-    # Big penalty for falling (below gap)
-    if agent['y'] < gap_y - 15:
-        reward = -10.0
-    
-    # Reward for grabbing in gap zone
-    if in_gap and agent['is_grabbing']:
-        reward += 3.0
-        
-        # Extra reward for being near other grabbing agents (chain)
-        for neighbor in env_state['neighbors']:
-            n_in_gap = gap_x1 <= neighbor['x'] <= gap_x2
-            if n_in_gap and neighbor['is_grabbing']:
-                dist = math.sqrt((agent['x']-neighbor['x'])**2 + (agent['y']-neighbor['y'])**2)
-                if dist < 8:
-                    reward += 2.0
-    
-    # Encourage movement toward gap if not there
-    if not near_gap:
-        dist_to_gap = min(abs(agent['x'] - gap_x1), abs(agent['x'] - gap_x2))
-        reward -= dist_to_gap / 50.0
-else:
-    # No gap, just move toward goal
-    if env_state['goals']:
-        goal = env_state['goals'][0]
-        dist = math.sqrt((goal['x']-agent['x'])**2 + (goal['y']-agent['y'])**2)
-        reward = -dist / 100.0
+# 2. Movement Incentive (Small bonus for velocity towards goal)
+# v_x towards goal (goal at x=90)
+if agent['vx'] > 0.1:
+    reward += 0.01
+
+# 3. Energy Penalty (Tiny)
+reward -= 0.001
 """,
     "training_params": {
-        "total_timesteps": 30000,
+        "total_timesteps": 60000,  # Quick regen
         "learning_rate": 0.0003,
         "gamma": 0.99,
         "batch_size": 64,
-        "n_envs": 4,
-        "max_episode_steps": 400
+        "n_steps": 2048,
+        "ent_coef": 0.01,
+        "max_episode_steps": 500
     }
 }
 
 print("=" * 50)
-print("BRIDGE BUILDING TEST")
+print("TOP-DOWN NAVIGATION TEST")
 print("=" * 50)
 print(f"World: {config['env_params']['world_width']}x{config['env_params']['world_height']}")
 print(f"Agents: {config['env_params']['num_agents']}")
 print(f"Gravity: {config['env_params']['physics']['gravity_y']}")
-print(f"Gap: x={config['env_params']['special_objects'][0]['x1']}-{config['env_params']['special_objects'][0]['x2']}")
 print(f"Action type: {config['action_space_type']} (with grab)")
 print(f"Timesteps: {config['training_params']['total_timesteps']}")
 print("=" * 50)

@@ -23,7 +23,8 @@ class Agent:
     y: float
     vx: float = 0.0
     vy: float = 0.0
-    comm_signal: float = 0.0 # Communication output
+    comm_signal: float = 0.0
+    energy: float = 1.0 # Battery/Stamina (0.0 to 1.0)
     is_grabbing: bool = False
     is_grounded: bool = False
     role: str = "default"
@@ -143,12 +144,15 @@ class UniversalSwarmEnv(gym.Env):
             "neighbor_density": 4,   # density in 4 quadrants
             "wall_distance": 4,      # distance to 4 walls
             "grabbing_state": 1,     # is_grabbing flag
-            "wall_distance": 4,      # distance to 4 walls
-            "grabbing_state": 1,     # is_grabbing flag
+            "energy": 1,             # battery level
             "time_remaining": 1,     # normalized time left
             "neighbor_signals": 3,   # signals from 3 nearest neighbors
         }
         self.enable_communication = env_params.get("enable_communication", False)
+        self.sensor_noise_std = env_params.get("sensor_noise_std", 0.0)
+        self.enable_sensor_noise = (self.sensor_noise_std > 0.0)
+        self.packet_loss_prob = env_params.get("packet_loss_prob", 0.0)
+        self.comm_range = env_params.get("comm_range", 1000.0) # Default infinite
         
         # Calculate total observation dimension
         self.obs_dim = sum(self.sensor_dims.get(s, 0) for s in self.sensors)
@@ -170,7 +174,7 @@ class UniversalSwarmEnv(gym.Env):
         self.current_step = 0
         self.max_steps = config.get("training_params", {}).get("max_episode_steps", 500)
         self.action_repeat = config.get("env_params", {}).get("action_repeat", 1)
-        self.constraint_iterations = config.get("env_params", {}).get("physics", {}).get("constraint_iterations", 1)
+        self.constraint_iterations = config.get("env_params", {}).get("physics", {}).get("constraint_iterations", 4)
         self.physics_profile = config.get("env_params", {}).get("physics_profile", "realistic")
         self.constraints = []  # Active constraints (joints)
         
@@ -336,7 +340,7 @@ def generated_reward_func(agent, env_state, math, np):
                     
                 elif sensor == "velocity":
                     # Normalized velocity
-                    max_speed = 10.0
+                    max_speed = 3.0 # Matches physics max_speed (2.0) + buffer for collisions
                     obs[i, idx] = np.clip(agent.vx / max_speed, -1, 1)
                     obs[i, idx + 1] = np.clip(agent.vy / max_speed, -1, 1)
                     idx += 2
@@ -404,6 +408,10 @@ def generated_reward_func(agent, env_state, math, np):
                     obs[i, idx] = 1.0 if agent.is_grabbing else 0.0
                     idx += 1
                     
+                elif sensor == "energy":
+                    obs[i, idx] = agent.energy
+                    idx += 1
+                    
                 elif sensor == "time_remaining":
                     obs[i, idx] = 1.0 - (self.current_step / self.max_steps)
                     idx += 1
@@ -415,12 +423,29 @@ def generated_reward_func(agent, env_state, math, np):
                     others.sort(key=lambda x: x[1])
                     for j in range(3):
                         if j < len(others):
-                            a, _ = others[j]
-                            obs[i, idx + j] = np.clip(a.comm_signal, -1, 1)
+                            a, dist = others[j]
+                            
+                            # Range Check
+                            if dist > self.comm_range:
+                                obs[i, idx + j] = 0.0
+                                continue
+                            
+                            # Packet Loss Check
+                            if self.packet_loss_prob > 0.0 and np.random.random() < self.packet_loss_prob:
+                                obs[i, idx + j] = 0.0
+                            else:
+                                obs[i, idx + j] = np.clip(a.comm_signal, -1, 1)
                         else:
                             obs[i, idx + j] = 0.0
                     idx += 3
         
+        # Add Sensor Noise (Gaussian)
+        if self.enable_sensor_noise:
+            noise = np.random.normal(0.0, self.sensor_noise_std, size=obs.shape).astype(np.float32)
+            obs += noise
+            # Clip to valid range? Ideally sensors are [-1, 1], noise can exceed.
+            # We let it exceed, network handles it. Simulates wild sensor spikes.
+            
         return obs
     
     def _compute_radar(self, agent, obstacles) -> np.ndarray:
@@ -508,16 +533,18 @@ def generated_reward_func(agent, env_state, math, np):
         gaps = [obj.to_dict() for obj in self.special_objects if obj.type == "gap"]
         
         return {
-            "goals": goals,
-            "neighbors": neighbors,
-            "obstacles": obstacles,
-            "gaps": gaps,
-            "time_step": self.current_step,
-            "world_width": self.world_width,
-            "world_height": self.world_height,
-            "num_agents": self.num_agents,
-            "all_agents": [a.to_dict() for a in self.agents],
-        }
+        "agent_idx": agent_id,  # Add current agent index
+        "goals": goals,
+        "neighbors": neighbors,
+        "obstacles": obstacles,
+        "gaps": gaps,
+        "time_step": self.current_step,
+        "world_width": self.world_width,
+        "world_height": self.world_height,
+        "num_agents": self.num_agents,
+        "all_agents": [a.to_dict() for a in self.agents],
+        "agents": [a.to_dict() for a in self.agents],  # Alias for all_agents
+    }
     
     def reset(self, seed: Optional[int] = None, options: Optional[dict] = None) -> tuple[np.ndarray, dict]:
         """Reset the environment to initial state."""
@@ -602,13 +629,35 @@ def generated_reward_func(agent, env_state, math, np):
         return obs, total_rewards, terminated, truncated, info
     
     def _apply_continuous_actions(self, actions: np.ndarray):
-        """Apply continuous actions (2D movement vectors)."""
+        """Apply continuous actions with Energy & Inertia."""
         actions = np.array(actions).reshape(self.num_agents, 2)
         
+        # Physics Params
+        max_speed = 2.0
+        inertia_alpha = 0.2 # low-pass filter (0.2 = heavy inertia, 1.0 = instant)
+        energy_drain_rate = 0.005
+        energy_regen_rate = 0.001
+        
         for i, agent in enumerate(self.agents):
-            # Actions are velocity changes
-            agent.vx += actions[i, 0] * 2.0  # Scale factor
-            agent.vy += actions[i, 1] * 2.0
+            ax, ay = actions[i]
+            
+            # 1. Energy Check
+            if agent.energy <= 0.05: # Low battery mode
+                ax *= 0.2
+                ay *= 0.2
+                
+            # 2. Target Velocity
+            target_vx = ax * max_speed
+            target_vy = ay * max_speed
+            
+            # 3. Apply Inertia (Torque Limit)
+            agent.vx = inertia_alpha * target_vx + (1 - inertia_alpha) * agent.vx
+            agent.vy = inertia_alpha * target_vy + (1 - inertia_alpha) * agent.vy
+            
+            # 4. Energy Consuption
+            speed = math.sqrt(agent.vx**2 + agent.vy**2)
+            drain = speed * energy_drain_rate
+            agent.energy = max(0.0, min(1.0, agent.energy - drain + energy_regen_rate))
     
     def _apply_discrete_actions(self, actions: np.ndarray):
         """Apply discrete actions (0=none, 1=up, 2=down, 3=left, 4=right, 5=grab)."""
@@ -621,31 +670,20 @@ def generated_reward_func(agent, env_state, math, np):
         for i, agent in enumerate(self.agents):
             action = int(actions[i])
             
-            # Control Authority
-            has_control = False
-            if agent.is_grounded:
-                has_control = True
-            elif arcade:
-                has_control = True  # Air control allowed in arcade
+            # TOP-DOWN: All agents always have control (no grounded check)
+            has_control = True
             
             # Movement Speed
-            speed = base_speed if has_control else 0.0
+            speed = base_speed
             
-            if action == 1:  # up / jump
-                # Realistic: Jump only if grounded
-                # Arcade: Jetpack / Double Jump allowed
-                can_jump = agent.is_grounded or arcade
-                
-                if can_jump:
-                    agent.vy += 6.0  # Jump impulse
-            elif action == 2:  # down
-                pass
-            elif action == 3:  # left
-                 if has_control:
-                    agent.vx -= speed
-            elif action == 4:  # right
-                if has_control:
-                    agent.vx += speed
+            if action == 1:  # up (+Y in top-down)
+                agent.vy += speed
+            elif action == 2:  # down (-Y in top-down)
+                agent.vy -= speed
+            elif action == 3:  # left (-X)
+                agent.vx -= speed
+            elif action == 4:  # right (+X)
+                agent.vx += speed
             elif action == 5:  # grab
                 # Toggle grab intent
                 agent.is_grabbing = not agent.is_grabbing
@@ -750,8 +788,8 @@ def generated_reward_func(agent, env_state, math, np):
              diff = (dist - target_dist) / dist
              
              # Stiffness (0.1 to 1.0)
-             # Higher = stiffer chain
-             stiffness = 0.5 
+             # Higher = stiffer chain, better for bridging
+             stiffness = 0.9 
              
              move_x = dx * diff * stiffness * 0.5 # Equal weighting for simplicity
              move_y = dy * diff * stiffness * 0.5
@@ -770,6 +808,50 @@ def generated_reward_func(agent, env_state, math, np):
              a1.vy += dvy * damping
              a2.vx -= dvx * damping
              a2.vy -= dvy * damping
+    
+    def _is_in_gap(self, agent) -> bool:
+        """Check if agent is positioned within any gap zone."""
+        for obj in self.special_objects:
+            if obj.type == "gap":
+                # Gap defined by x1, x2, y1, y2 (rectangular zone)
+                in_x = obj.x1 <= agent.x <= obj.x2
+                in_y = getattr(obj, 'y1', 0) <= agent.y <= getattr(obj, 'y2', self.world_height)
+                if in_x and in_y:
+                    return True
+        return False
+    
+    def _is_connected_to_ground(self, agent_id: int, visited: set = None) -> bool:
+        """
+        Check if agent is connected to solid ground through constraint chain.
+        Uses BFS to traverse the constraint graph.
+        
+        An agent is "grounded" if:
+        1. They are NOT in a gap zone, OR
+        2. They are connected via constraints to an agent who is grounded
+        """
+        if visited is None:
+            visited = set()
+        
+        if agent_id in visited:
+            return False  # Avoid cycles
+        visited.add(agent_id)
+        
+        agent = self.agents[agent_id]
+        
+        # Base case: Agent is on solid ground (not in gap)
+        if not self._is_in_gap(agent):
+            return True
+        
+        # Recursive case: Check all connected agents through constraints
+        for (id_a, id_b, _) in self.constraints:
+            if id_a == agent_id:
+                if self._is_connected_to_ground(id_b, visited):
+                    return True
+            elif id_b == agent_id:
+                if self._is_connected_to_ground(id_a, visited):
+                    return True
+        
+        return False  # Not connected to ground
     
     def _apply_physics(self):
         """Apply physics simulation with substepping (Physics V2)."""
@@ -846,18 +928,15 @@ def generated_reward_func(agent, env_state, math, np):
         # 2. Physics Substepping
         for _ in range(substeps):
             for agent in self.agents:
-                # Apply gravity
-                agent.vy -= self.gravity_y * dt_sub
+                # TOP-DOWN MODE: No gravity (horizontal plane)
+                # gravity_y is ignored in top-down for movement, only used for special effects
+                # agent.vy -= self.gravity_y * dt_sub  # REMOVED for top-down
                 
-                # Apply air drag (linear drag)
-                drag = 0.01
+                # Apply light drag (top-down: surface resistance)
+                # Note: Applied every substep, so keep LOW
+                drag = 0.005  # Very light drag
                 agent.vx *= (1 - drag)
                 agent.vy *= (1 - drag)
-                
-                # Apply friction ONLY if grounded (y=0)
-                if agent.is_grounded:
-                    friction = self.friction
-                    agent.vx *= (1 - friction)
                 
                 # Integrate Position (Symplectic Euler)
                 agent.x += agent.vx * dt_sub
@@ -868,40 +947,35 @@ def generated_reward_func(agent, env_state, math, np):
             self._solve_collisions()
             self._solve_constraints()
             
-            # Bounds Check
-            for agent in self.agents:
-                # Reset grounded
-                agent.is_grounded = False
+            # Bounds Check & Gap Handling (TOP-DOWN)
+            for i, agent in enumerate(self.agents):
+                agent.is_grounded = True  # In top-down, always "grounded"
                 
-                # World Bounds & Floor
-                
-                # Check Chasm (Gap)
-                in_gap = False
-                for obj in self.special_objects:
-                    if obj.type == "gap":
-                         if obj.x1 <= agent.x <= obj.x2:
-                                in_gap = True
-                                break
-                
-                # Floor Collision
-                if in_gap:
-                    # In gap: Allow falling
-                    if agent.y < -50:
-                        agent.y = -50
+                # TOP-DOWN Gap Logic: Chain-based survival
+                if self._is_in_gap(agent):
+                    # Agent is in gap zone - check if connected to ground
+                    if not self._is_connected_to_ground(i):
+                        # NOT connected to solid ground = DEATH!
+                        # Respawn agent to spawn zone
+                        spawn_zone = self.config.get("env_params", {}).get("spawn_zone", None)
+                        if spawn_zone:
+                            agent.x = np.random.uniform(spawn_zone.get("x1", 5), spawn_zone.get("x2", 20))
+                            agent.y = np.random.uniform(spawn_zone.get("y1", 5), spawn_zone.get("y2", 50))
+                        else:
+                            agent.x = np.random.uniform(5, 20)
+                            agent.y = np.random.uniform(5, self.world_height / 2)
+                        
+                        agent.vx = 0
                         agent.vy = 0
-                else:
-                    # Solid floor at y=0
-                    if agent.y <= 0:
-                        agent.y = 0
-                        if agent.vy < 0:
-                            agent.vy = 0
-                        agent.is_grounded = True
+                        agent.energy = max(0.2, agent.energy - 0.3)  # Energy penalty
+                        
+                        # Release all constraints (chains break on death)
+                        self.constraints = [c for c in self.constraints if c[0] != i and c[1] != i]
+                        agent.active_constraints = []
                 
-                # Walls
+                # World Bounds (Top-Down: All 4 walls)
                 agent.x = np.clip(agent.x, 0, self.world_width)
-                if agent.y > self.world_height:
-                    agent.y = self.world_height
-                    if agent.vy > 0: agent.vy = 0
+                agent.y = np.clip(agent.y, 0, self.world_height)
 
             # Static Obstacles Collision
             for obj in self.special_objects:
