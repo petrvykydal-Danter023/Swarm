@@ -1,0 +1,68 @@
+{
+    "task_name": "forest_search",
+    "description": "Swarm agents search for lost persons in a 2D forest environment",
+    "observation_type": "spatial",
+    "action_space_type": "continuous",
+    "env_params": {
+        "world_width": 100,
+        "world_height": 100,
+        "num_agents": 10,
+        "physics": {
+            "gravity_y": 0.0,
+            "friction": 0.15,
+            "time_step": 0.1
+        },
+        "special_objects": [
+            {
+                "type": "goal",
+                "x": 85,
+                "y": 85
+            },
+            {
+                "type": "goal",
+                "x": 15,
+                "y": 90
+            },
+            {
+                "type": "obstacle",
+                "x": 30,
+                "y": 30,
+                "radius": 5
+            },
+            {
+                "type": "obstacle",
+                "x": 50,
+                "y": 60,
+                "radius": 7
+            },
+            {
+                "type": "obstacle",
+                "x": 70,
+                "y": 40,
+                "radius": 4
+            },
+            {
+                "type": "obstacle",
+                "x": 25,
+                "y": 70,
+                "radius": 6
+            },
+            {
+                "type": "obstacle",
+                "x": 60,
+                "y": 20,
+                "radius": 5
+            }
+        ]
+    },
+    "reward_code": "# Forest search reward function\n# Reward agents for getting close to goals (lost persons)\n# Penalize staying still\n\nif env_state['goals']:\n    # Find nearest goal\n    min_dist = float('inf')\n    for goal in env_state['goals']:\n        dx = goal['x'] - agent['x']\n        dy = goal['y'] - agent['y']\n        dist = math.sqrt(dx*dx + dy*dy)\n        if dist < min_dist:\n            min_dist = dist\n    \n    # Distance-based reward (closer = better)\n    reward = -min_dist / 100.0\n    \n    # Bonus for reaching a person\n    if min_dist < 5:\n        reward = 10.0\n    \n    # Small penalty for low speed (encourages exploration)\n    speed = math.sqrt(agent['vx']**2 + agent['vy']**2)\n    if speed < 0.5:\n        reward -= 0.1\nelse:\n    reward = 0.0",
+    "training_params": {
+        "algo": "PPO",
+        "total_timesteps": 50000,
+        "learning_rate": 0.0003,
+        "gamma": 0.99,
+        "batch_size": 64,
+        "n_envs": 4,
+        "max_episode_steps": 500
+    }
+}

@@ -1,0 +1,83 @@
+{
+    "env_params": {
+        "world_width": 100,
+        "world_height": 100,
+        "num_agents": 5,
+        "action_repeat": 4,
+        "physics_profile": "arcade",
+        "spawn_zone": {
+            "x1": 5,
+            "x2": 20,
+            "y1": 5,
+            "y2": 50
+        },
+        "physics": {
+            "gravity_y": 0.5,
+            "agent_mass": 1.0,
+            "constraint_iterations": 1
+        },
+        "special_objects": [
+            {
+                "type": "goal",
+                "x": 90,
+                "y": 50,
+                "radius": 5.0
+            },
+            {
+                "type": "gap",
+                "x1": 30,
+                "x2": 40,
+                "y1": 0,
+                "y2": 100
+            },
+            {
+                "type": "gap",
+                "x1": 60,
+                "x2": 75,
+                "y1": 0,
+                "y2": 100
+            },
+            {
+                "type": "obstacle",
+                "x": 50,
+                "y": 20,
+                "radius": 3.0
+            },
+            {
+                "type": "obstacle",
+                "x": 50,
+                "y": 50,
+                "radius": 3.0
+            },
+            {
+                "type": "obstacle",
+                "x": 50,
+                "y": 80,
+                "radius": 3.0
+            },
+            {
+                "type": "obstacle",
+                "x": 80,
+                "y": 35,
+                "radius": 4.0
+            }
+        ],
+        "enable_communication": true,
+        "sensors": [
+            "position",
+            "velocity",
+            "goal_vector",
+            "obstacle_radar",
+            "neighbor_vectors",
+            "neighbor_signals",
+            "grabbing_state"
+        ]
+    },
+    "reward_code": "dist = math.sqrt((agent['x']-90)**2 + (agent['y']-50)**2)\nreward = -dist * 0.01\nif dist < 5.0: reward += 10.0\nif agent['y'] < 0: reward -= 10.0",
+    "training_params": {
+        "max_episode_steps": 500,
+        "total_timesteps": 500000
+    },
+    "observation_type": "spatial",
+    "action_space_type": "continuous"
+}
