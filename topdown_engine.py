@@ -53,6 +53,7 @@ class TopDownSwarmEnv(gym.Env):
     """
     Entropy Engine V4: Pure Top-Down Swarm Simulator.
     Features: Zero Gravity, High Friction, Elastic Collisions, Payload Transport.
+    Supports: Dynamic Sensors, Communication, Noise/Interference.
     """
     metadata = {'render_modes': ['rgb_array']}
 
@@ -69,23 +70,36 @@ class TopDownSwarmEnv(gym.Env):
         # Physics Params
         self.friction = config.get("friction", 0.2)
         self.restitution = config.get("restitution", 0.5)
-        self.payload_friction = config.get("payload_friction", 0.1) # Heavy objects slide more/less?
+        self.payload_friction = config.get("payload_friction", 0.1)
+        
+        # Sensory & Comms
+        self.sensors = config.get("sensors", ["position", "velocity", "goal_vector", "neighbor_vectors"])
+        self.enable_communication = config.get("enable_communication", False)
+        self.obs_noise_std = config.get("obs_noise_std", 0.0)
         
         # Entities
         self.agents: List[Agent] = []
         self.obstacles: List[Obstacle] = []
-        self.payloads: List[Payload] = [] # Transportable objects
+        self.payloads: List[Payload] = []
+        
+        # Comm State
+        self.comm_signals = np.zeros(self.num_agents, dtype=np.float32)
+        
+        # Calculate Obs Dim
+        self.obs_dim = self._calculate_obs_dim()
         
         # Gym Spaces
         self.action_type = config.get("action_type", "continuous")
         if self.action_type == "continuous":
+            # [vx, vy, grab] + [comm]
+            act_dim = 3 + (1 if self.enable_communication else 0)
             self.action_space = spaces.Box(
-                low=-1.0, high=1.0, shape=(self.num_agents, 3), dtype=np.float32
+                low=-1.0, high=1.0, shape=(self.num_agents, act_dim), dtype=np.float32
             )
         else:
+            # Discrete (No comms support in discrete currently, or need mapping)
             self.action_space = spaces.MultiDiscrete([6] * self.num_agents)
 
-        self.obs_dim = 14
         self.observation_space = spaces.Box(
             low=-np.inf, high=np.inf, shape=(self.num_agents, self.obs_dim), dtype=np.float32
         )
@@ -95,6 +109,20 @@ class TopDownSwarmEnv(gym.Env):
         self._build_world()
         self.current_step = 0
         self.max_steps = config.get("max_steps", 500)
+
+    def _calculate_obs_dim(self):
+        dim = 0
+        for s in self.sensors:
+            if s == "position": dim += 2
+            elif s == "velocity": dim += 2
+            elif s == "goal_vector": dim += 2
+            elif s == "neighbor_vectors": dim += 6 # 3 neighbors * 2
+            elif s == "obstacle_radar": dim += 8
+            elif s == "payload_radar": dim += 8
+            elif s == "grabbing_state": dim += 1
+            elif s == "energy": dim += 1
+            elif s == "neighbor_signals": dim += 3 # 3 nearest
+        return dim
 
     def _build_world(self):
         """Initialize agents, obstacles, and payloads."""
@@ -119,8 +147,6 @@ class TopDownSwarmEnv(gym.Env):
                     obj["x"], obj["y"], obj.get("radius", 5), obj["type"]
                 ))
     
-    # ... reset, step, _apply_control methods mostly same ...
-    
     def reset(self, seed=None, options=None):
         super().reset(seed=seed)
         if seed is not None: np.random.seed(seed)
@@ -130,7 +156,14 @@ class TopDownSwarmEnv(gym.Env):
 
     def step(self, actions):
         self.current_step += 1
-        self._apply_control(actions)
+        
+        # Split actions if communication enabled
+        move_actions = actions
+        if self.enable_communication and self.action_type == "continuous":
+            move_actions = actions[:, :3]
+            self.comm_signals = actions[:, 3]
+        
+        self._apply_control(move_actions)
         self._integrate_physics()
         self._solve_collisions()
         self._enforce_bounds()
@@ -141,8 +174,8 @@ class TopDownSwarmEnv(gym.Env):
         for i, agent in enumerate(self.agents):
             if self.action_type == "continuous":
                 ax, ay, grab = actions[i]
+                agent.is_grabbing = (grab > 0.5)
             else:
-                # Basic discrete logic
                 sc = actions[i] if np.isscalar(actions[i]) else actions[i].item()
                 act = int(sc)
                 ax, ay = 0.0, 0.0
@@ -150,11 +183,12 @@ class TopDownSwarmEnv(gym.Env):
                 elif act == 2: ay = -1.0
                 elif act == 3: ax = -1.0
                 elif act == 4: ax = 1.0
+                if act == 5: agent.is_grabbing = not agent.is_grabbing
+            
             agent.vx += ax * speed * self.dt
             agent.vy += ay * speed * self.dt
 
     def _integrate_physics(self):
-        """Apply velocity and friction to Agents AND Payloads."""
         # Agents
         for agent in self.agents:
             agent.vx *= (1.0 - self.friction)
@@ -170,33 +204,27 @@ class TopDownSwarmEnv(gym.Env):
             p.y += p.vy
 
     def _solve_collisions(self):
-        """Solve ALL collisions (Agent-Agent, Agent-Obstacle, Agent-Payload, Payload-Obstacle)."""
-        
         # 1. Agent vs Everything
         for i in range(self.num_agents):
             a1 = self.agents[i]
-            
             # Vs Obstacles
             for obs in self.obstacles:
                 if obs.type == "obstacle":
                     self._solve_circle_circle(a1, obs, dynamic_b=False)
-
-            # Vs Payloads (Dynamic-Dynamic with Mass)
+            # Vs Payloads
             for p in self.payloads:
                 self._solve_circle_circle(a1, p, dynamic_b=True)
-            
             # Vs Agents
             for j in range(i + 1, self.num_agents):
                 self._solve_circle_circle(a1, self.agents[j], dynamic_b=True)
 
-        # 2. Payload vs Environment (Obstacles)
+        # 2. Payload vs Environment
         for p in self.payloads:
              for obs in self.obstacles:
                 if obs.type == "obstacle":
                     self._solve_circle_circle(p, obs, dynamic_b=False)
 
     def _solve_circle_circle(self, c1, c2, dynamic_b=True):
-        """Generic elastic collision solver."""
         dx = c2.x - c1.x
         dy = c2.y - c1.y
         dist = math.sqrt(dx*dx + dy*dy)
@@ -207,54 +235,41 @@ class TopDownSwarmEnv(gym.Env):
             nx, ny = dx/dist, dy/dist
             overlap = min_dist - dist
             
-            # Static B (Obstacle)
             if not dynamic_b:
                 c1.x -= nx * overlap
                 c1.y -= ny * overlap
                 vn = c1.vx * nx + c1.vy * ny
-                if vn > 0: return # Moving away
-                # Bounce
+                if vn > 0: return 
                 c1.vx -= (1 + self.restitution) * vn * nx
                 c1.vy -= (1 + self.restitution) * vn * ny
                 return
 
-            # Dynamic B (Agent/Payload)
-            # Mass handling
             m1 = getattr(c1, 'mass', 1.0)
             m2 = getattr(c2, 'mass', 1.0)
             inv_m1 = 1.0 / m1
             inv_m2 = 1.0 / m2
             total_inv_mass = inv_m1 + inv_m2
             
-            # Position Correction (Push apart based on mass)
             move_per_mass = overlap / total_inv_mass
             c1.x -= nx * move_per_mass * inv_m1
             c1.y -= ny * move_per_mass * inv_m1
             c2.x += nx * move_per_mass * inv_m2
             c2.y += ny * move_per_mass * inv_m2
             
-            # Velocity Response (Elastic)
-            # Relative velocity along normal
+            # Velocity Response
             dvx = c2.vx - c1.vx
             dvy = c2.vy - c1.vy
             vn = dvx * nx + dvy * ny
+            if vn > 0: return 
             
-            if vn > 0: return # Moving away
-            
-            # Impulse scalar
             j = -(1 + self.restitution) * vn
             j /= total_inv_mass
-            
-            impulse_x = j * nx
-            impulse_y = j * ny
-            
-            c1.vx -= impulse_x * inv_m1
-            c1.vy -= impulse_y * inv_m1
-            c2.vx += impulse_x * inv_m2
-            c2.vy += impulse_y * inv_m2
+            c1.vx -= j * nx * inv_m1
+            c1.vy -= j * ny * inv_m1
+            c2.vx += j * nx * inv_m2
+            c2.vy += j * ny * inv_m2
 
     def _enforce_bounds(self):
-        # Agents & Payloads
         for ent in self.agents + self.payloads:
             if ent.x < ent.radius: ent.x = ent.radius; ent.vx *= -0.5
             if ent.x > self.width - ent.radius: ent.x = self.width - ent.radius; ent.vx *= -0.5
@@ -263,12 +278,83 @@ class TopDownSwarmEnv(gym.Env):
 
     def _get_obs(self):
         obs = np.zeros((self.num_agents, self.obs_dim), dtype=np.float32)
-        # Populate simplest obs: [x,y,vx,vy] relative
-        # To be expanded for real tasks
+        
+        goals = [o for o in self.obstacles if o.type == "goal"]
+        
+        for i, agent in enumerate(self.agents):
+            idx = 0
+            for sensor in self.sensors:
+                if sensor == "position":
+                    obs[i, idx] = (agent.x / self.width) * 2 - 1
+                    obs[i, idx+1] = (agent.y / self.height) * 2 - 1
+                    idx += 2
+                elif sensor == "velocity":
+                    obs[i, idx] = np.clip(agent.vx, -1, 1)
+                    obs[i, idx+1] = np.clip(agent.vy, -1, 1)
+                    idx += 2
+                elif sensor == "goal_vector":
+                    if goals:
+                        # Find nearest goal
+                        g = min(goals, key=lambda o: (o.x-agent.x)**2 + (o.y-agent.y)**2)
+                        dx, dy = g.x - agent.x, g.y - agent.y
+                        dist = math.sqrt(dx*dx + dy*dy) + 0.001
+                        obs[i, idx] = dx / dist
+                        obs[i, idx+1] = dy / dist
+                    idx += 2
+                elif sensor == "neighbor_vectors":
+                    # 3 nearest
+                    others = [(a, math.sqrt((a.x-agent.x)**2 + (a.y-agent.y)**2)) 
+                              for a in self.agents if a.id != agent.id]
+                    others.sort(key=lambda x: x[1])
+                    for k in range(3):
+                        if k < len(others):
+                            oa, dist = others[k]
+                            if dist == 0: dist = 0.001
+                            obs[i, idx+k*2] = (oa.x - agent.x) / 50.0 # Norm by some range
+                            obs[i, idx+k*2+1] = (oa.y - agent.y) / 50.0
+                    idx += 6
+                elif sensor == "obstacle_radar":
+                    # 8 rays
+                    radar = self._compute_radar(agent, [o for o in self.obstacles if o.type=="obstacle"])
+                    obs[i, idx:idx+8] = radar
+                    idx += 8
+                elif sensor == "neighbor_signals":
+                    others = [(j, math.sqrt((self.agents[j].x-agent.x)**2 + (self.agents[j].y-agent.y)**2)) 
+                              for j in range(self.num_agents) if j != i]
+                    others.sort(key=lambda x: x[1])
+                    for k in range(3):
+                         if k < len(others):
+                             idx_other = others[k][0]
+                             obs[i, idx+k] = self.comm_signals[idx_other]
+                    idx += 3
+        
+        # Add Noise (Interference)
+        if self.obs_noise_std > 0:
+            noise = np.random.normal(0, self.obs_noise_std, obs.shape)
+            obs += noise
+            
         return obs
-    
+
+    def _compute_radar(self, agent, targets):
+        radar = np.ones(8, dtype=np.float32)
+        max_range = 30.0
+        angles = [0, math.pi/4, math.pi/2, 3*math.pi/4, math.pi, 5*math.pi/4, 3*math.pi/2, 7*math.pi/4]
+        
+        for t in targets:
+            dx = t.x - agent.x
+            dy = t.y - agent.y
+            dist = math.sqrt(dx*dx + dy*dy)
+            if dist < max_range:
+                angle = math.atan2(dy, dx)
+                if angle < 0: angle += 2*math.pi
+                for d in range(8):
+                    diff = abs(angles[d] - angle)
+                    diff = min(diff, 2*math.pi - diff)
+                    if diff < math.pi/8: # 22.5 deg cone
+                        radar[d] = min(radar[d], dist / max_range)
+        return radar
+
     def _compute_rewards(self):
-        # Wrapper for user code
         rewards = np.zeros(self.num_agents, dtype=np.float32)
         for i, agent in enumerate(self.agents):
             try:
@@ -276,7 +362,8 @@ class TopDownSwarmEnv(gym.Env):
                     "agent_idx": i,
                     "agents": [a.to_dict() for a in self.agents],
                     "payloads": [p.__dict__ for p in self.payloads],
-                    "goals": [o.__dict__ for o in self.obstacles if o.type == "goal"]
+                    "goals": [o.__dict__ for o in self.obstacles if o.type == "goal"],
+                    "comm_signals": self.comm_signals
                 }
                 rewards[i] = self.reward_func(agent.to_dict(), env_state, math, np)
             except: rewards[i] = 0.0
@@ -302,7 +389,6 @@ def user_reward(agent, env_state, math, np):
             rr = int(r*5)
             y_min, y_max = max(0, cy-rr), min(h, cy+rr)
             x_min, x_max = max(0, cx-rr), min(w, cx+rr)
-            # Center block
             img[max(0,cy-rr+1):min(h,cy+rr-1), max(0,cx-rr+1):min(w,cx+rr-1)] = c
 
         for obs in self.obstacles:
