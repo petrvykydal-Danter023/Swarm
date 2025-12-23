@@ -4,6 +4,7 @@ import numpy as np
 import math
 from dataclasses import dataclass, field
 from typing import List, Optional, Tuple, Dict
+from collections import deque
 import time
 
 @dataclass
@@ -98,9 +99,20 @@ class TopDownSwarmEnv(gym.Env):
             self.action_space = spaces.Box(
                 low=-1.0, high=1.0, shape=(self.num_agents, act_dim), dtype=np.float32
             )
+            # Motor Lag (Action Buffer)
+            self.motor_lag = config.get("motor_lag", 0) # 0 = no lag
+            self.action_queues = [deque(maxlen=self.motor_lag + 1) for _ in range(self.num_agents)]
+            # Fill with zeros initially
+            if self.motor_lag > 0:
+                for i in range(self.num_agents):
+                    for _ in range(self.motor_lag):
+                         self.action_queues[i].append(np.zeros(act_dim, dtype=np.float32))
         else:
             # Discrete (No comms support in discrete currently, or need mapping)
             self.action_space = spaces.MultiDiscrete([6] * self.num_agents)
+            # Motor lag for discrete not fully impl detail yet, skipping strict queue for now or assuming continuous only for lag
+            self.motor_lag = 0 # Force 0 for discrete for now
+            self.action_queues = []
 
         self.observation_space = spaces.Box(
             low=-np.inf, high=np.inf, shape=(self.num_agents, self.obs_dim), dtype=np.float32
@@ -153,17 +165,43 @@ class TopDownSwarmEnv(gym.Env):
         super().reset(seed=seed)
         if seed is not None: np.random.seed(seed)
         self._build_world()
+        self._reset_queues() # Clear buffers
         self.current_step = 0
         return self._get_obs(), {}
+
+    def _reset_queues(self):
+        if self.motor_lag > 0 and self.action_type == "continuous":
+             # [vx, vy, grab] + [comm]
+             act_dim = 3 + (1 if self.enable_communication else 0)
+             self.action_queues = [deque(maxlen=self.motor_lag + 1) for _ in range(self.num_agents)]
+             for i in range(self.num_agents):
+                 for _ in range(self.motor_lag):
+                      self.action_queues[i].append(np.zeros(act_dim, dtype=np.float32))
 
     def step(self, actions):
         self.current_step += 1
         
+        applied_actions = actions
+        if self.motor_lag > 0 and self.action_type == "continuous":
+             # Push new actions, Pop old actions to apply
+             delayed_actions = []
+             for i in range(self.num_agents):
+                  self.action_queues[i].append(actions[i])
+                  # Debug
+                  # print(f"DEBUG: Step {self.current_step}. Queue Len Before Pop={len(self.action_queues[i])}")
+                  
+                  # Re-init logic slightly:
+                  # We just need to popleft and append.
+                  old_act = self.action_queues[i].popleft()
+                  # self.action_queues[i].append(actions[i]) # REMOVED DUPLICATE
+                  delayed_actions.append(old_act)
+             applied_actions = np.array(delayed_actions)
+
         # Split actions if communication enabled
-        move_actions = actions
+        move_actions = applied_actions
         if self.enable_communication and self.action_type == "continuous":
-            move_actions = actions[:, :3]
-            self.comm_signals = actions[:, 3]
+            move_actions = applied_actions[:, :3]
+            self.comm_signals = applied_actions[:, 3]
         
         self._apply_control(move_actions)
         self._integrate_physics()
