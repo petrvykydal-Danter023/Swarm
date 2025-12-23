@@ -6,6 +6,7 @@ from dataclasses import dataclass, field
 from typing import List, Optional, Tuple, Dict
 from collections import deque
 import time
+from goals import GoalManager
 
 @dataclass
 class Agent:
@@ -71,6 +72,8 @@ class TopDownSwarmEnv(gym.Env):
         self.num_agents = self.config.get("num_agents", 10)
         self.dt = self.config.get("dt", 0.1)
         self.observation_type = self.config.get("observation_type", "spatial") # Compatibility with rl_trainer
+        self.agent_mode = self.config.get("agent_mode", "nav")
+        self.detection_radius = self.config.get("detection_radius", 100.0)
         
         # Physics Params
         self.friction = self.config.get("friction", 0.2)
@@ -88,6 +91,9 @@ class TopDownSwarmEnv(gym.Env):
         self.agents: List[Agent] = []
         self.obstacles: List[Obstacle] = []
         self.payloads: List[Payload] = []
+        
+        # Goal Manager
+        self.goal_manager = GoalManager(self.config)
         
         # Comm State
         self.comm_signals = np.zeros(self.num_agents, dtype=np.float32)
@@ -166,10 +172,16 @@ class TopDownSwarmEnv(gym.Env):
                     id=len(self.payloads),
                     x=obj["x"], y=obj["y"], radius=obj.get("radius", 5), mass=obj.get("mass", 5.0)
                 ))
+            elif obj["type"] == "goal":
+                # Handled by GoalManager
+                pass
             else:
                 self.obstacles.append(Obstacle(
                     obj["x"], obj["y"], obj.get("radius", 5), obj["type"]
                 ))
+        
+        # Reset Goal Manager state if needed
+        self.goal_manager._parse_goals(self.config)
     
     def reset(self, seed=None, options=None):
         super().reset(seed=seed)
@@ -413,7 +425,7 @@ class TopDownSwarmEnv(gym.Env):
     def _get_obs(self):
         obs = np.zeros((self.num_agents, self.obs_dim), dtype=np.float32)
         
-        goals = [o for o in self.obstacles if o.type == "goal"]
+        # goals = [o for o in self.obstacles if o.type == "goal"] # Handled by Manager now
         
         for i, agent in enumerate(self.agents):
             idx = 0
@@ -427,13 +439,11 @@ class TopDownSwarmEnv(gym.Env):
                     obs[i, idx+1] = np.clip(agent.vy, -1, 1)
                     idx += 2
                 elif sensor == "goal_vector":
-                    if goals:
-                        # Find nearest goal
-                        g = min(goals, key=lambda o: (o.x-agent.x)**2 + (o.y-agent.y)**2)
-                        dx, dy = g.x - agent.x, g.y - agent.y
-                        dist = math.sqrt(dx*dx + dy*dy) + 0.001
-                        obs[i, idx] = dx / dist
-                        obs[i, idx+1] = dy / dist
+                    obs[i, idx:idx+2] = self.goal_manager.get_observation(
+                        agent, 
+                        mode=self.agent_mode, 
+                        detection_radius=self.detection_radius
+                    )
                     idx += 2
                 elif sensor == "neighbor_vectors":
                     # 3 nearest
@@ -567,7 +577,7 @@ class TopDownSwarmEnv(gym.Env):
                     "agent_idx": i,
                     "agents": [a.to_dict() for a in self.agents],
                     "payloads": [p.__dict__ for p in self.payloads],
-                    "goals": [o.__dict__ for o in self.obstacles if o.type == "goal"],
+                    "goals": [g.__dict__ for g in self.goal_manager.goals], # From Manager
                     "obstacles": [o.__dict__ for o in self.obstacles if o.type == "obstacle"],
                     "comm_signals": self.comm_signals
                 }
@@ -617,21 +627,24 @@ def user_reward(agent, env_state, math, np):
         for y in range(0, h, grid_spacing):
             cv2.line(img, (0, y), (w, y), (40, 40, 40), 1)
 
-        # Draw Obstacles & Goals
+        # Draw Goals (From Manager)
+        for goal in self.goal_manager.goals:
+            cx, cy = int(goal.x * scale), int((self.height - goal.y) * scale)
+            r = int(goal.radius * scale)
+            # Green filled + lighter outline
+            cv2.circle(img, (cx, cy), r, (0, 150, 0), -1)
+            cv2.circle(img, (cx, cy), r, (0, 200, 0), 2)
+            # Label
+            cv2.putText(img, "GOAL", (cx - 15, cy + 5), 
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
+
+        # Draw Obstacles
         for obs in self.obstacles:
             cx, cy = int(obs.x * scale), int((self.height - obs.y) * scale)
             r = int(obs.radius * scale)
-            if obs.type == "goal":
-                # Green filled + lighter outline
-                cv2.circle(img, (cx, cy), r, (0, 150, 0), -1)
-                cv2.circle(img, (cx, cy), r, (0, 200, 0), 2)
-                # Label
-                cv2.putText(img, "GOAL", (cx - 15, cy + 5), 
-                           cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
-            else:
-                # Gray Obstacle
-                cv2.circle(img, (cx, cy), r, (100, 100, 100), -1)
-                cv2.circle(img, (cx, cy), r, (150, 150, 150), 2)
+            # Gray Obstacle
+            cv2.circle(img, (cx, cy), r, (100, 100, 100), -1)
+            cv2.circle(img, (cx, cy), r, (150, 150, 150), 2)
 
         # Draw Payloads
         for p in self.payloads:
