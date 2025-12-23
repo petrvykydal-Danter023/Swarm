@@ -576,11 +576,12 @@ class TopDownSwarmEnv(gym.Env):
                 # Visual Penalty Feedback
                 # Reset to Blue
                 agent.color = (0, 0, 255)
-                # If significant penalty, flash Orange
-                if rewards[i] < -1.0:
+                # If significant penalty (Proximity/Jerk), flash Orange
+                # Distance penalty is usually -1.0 to -3.0. We want to ignore that.
+                if rewards[i] < -3.5:
                     agent.color = (255, 165, 0)
                 # If critical penalty (stall/crash), flash Red
-                if rewards[i] < -9.0:
+                if rewards[i] < -8.0:
                     agent.color = (255, 0, 0)
                     
             except: rewards[i] = 0.0
