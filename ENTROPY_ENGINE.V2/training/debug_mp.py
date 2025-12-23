@@ -19,6 +19,8 @@ def main():
         
         # Step
         actions = [env.action_space.sample() for _ in range(4)] # 2 * 2 = 4 agents
+        import numpy as np
+        actions = np.array(actions)
         print("Stepping...")
         env.step_async(actions)
         obs, rews, dones, infos = env.step_wait()

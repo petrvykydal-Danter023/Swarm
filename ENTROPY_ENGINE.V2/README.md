@@ -99,6 +99,13 @@
 
 ---
 
+## ✅ Numba Optimalizace
+*Výsledky benchmarku (100 agentů, Zrychlení: 10.3x!):*
+- Bez Numby: +- 47 FPS
+- S Numbou: +- 483 FPS
+
+---
+
 ## 🛠️ Getting Started
 
 ### 1. Install Dependencies
