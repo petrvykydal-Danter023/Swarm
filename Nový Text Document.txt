@@ -1,0 +1,27 @@
+🚀 Návrhy na zrychlení
+
+1. Masivní Paralelizace (Low Hanging Fruit 🍎)
+Co udělat: Zvýšit N_ENVS v 
+train_multicore.py
+ z 8 na počet logických jader tvého CPU mínus 2 (např. pokud máš 24 vláken, dej tam 22).
+Proč: Tvoje CPU jede jen na 35%. Každý nový proces přidá dalších 10 agentů sbírajících data paralelně.
+Očekávaný dopad: Lineární nárůst FPS (pokud máš volná jádra). GPU zátěž stoupne.
+
+2. Optimalizace Senzorů (Lidar Raycasting) ⚡
+Co udělat: Přepsat výpočet Lidaru v Agent.update_sensors pomocí Numba (@jit).
+Proč: Python je pomalý ve smyčkách. Raycasting pro 32 paprsků x 80 agentů = 2560 výpočtů každých pár milisekund. V čistém Pythonu/Pymunku to brzdí worker procesy.
+Očekávaný dopad: Zrychlení "kroku" prostředí o 2x-5x, což umožní rychlejší krmení GPU.
+
+3. Shared Memory Buffer 🧠
+Co udělat: Místo posílání observací přes Pipe (což data serializuje/pickluje = pomalé) použít multiprocessing.shared_memory.
+Proč: S 80+ agenty posíláme tam a zpět spoustu floats. Zápis přímo do sdílené paměti odstraní režii kopírování dat mezi procesy.
+Očekávaný dopad: Snížení latence mezi 
+step()
+ a model.learn().
+ 
+4. Vektorizovaná Fyzika na GPU (The "Endgame" Solution ☢️)
+Co udělat: Zahodit Pymunk (CPU) a přejít na JAX (Brax/Mjx) nebo Isaac Gym.
+Proč: Současná architektura je: CPU počítá fyziku -> posílá data -> GPU počítá síť. S JAXem běží fyzika přímo na GPU vedle neuronové sítě. Data neopustí grafickou kartu.
+Očekávaný dopad: FPS v řádech stovek tisíc (100k+). Je to ale kompletní přepsání core/physics.py a 
+env/entropy_env.py
+.

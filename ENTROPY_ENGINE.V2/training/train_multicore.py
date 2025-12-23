@@ -3,12 +3,11 @@ import os
 import time
 
 # Add the module root to path
-# Add the module root to path
 V2_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.append(V2_ROOT)
 
 from env.entropy_env import EntropyEnv
-from training.custom_wrapper import PettingZooToVecEnv
+from training.multicore_wrapper import AsyncVectorizedEntropyEnv
 from training.callbacks import GifRecorderCallback, RichLoggerCallback
 from shared.logger import RichLogger
 from sb3_contrib import RecurrentPPO
@@ -16,31 +15,41 @@ import wandb
 from wandb.integration.sb3 import WandbCallback
 
 def main():
-    print("Initializing Environment...")
+    print("Initializing Multicore Environment...")
+    
+    # 8 cores * 10 agents = 80 agents learning in parallel
+    N_ENVS = 8 
+    AGENTS_PER_ENV = 10
     
     # Init WandB
     config = {
         "policy_type": "MlpLstmPolicy",
-        "total_timesteps": 200_000,
-        "n_agents": 10,
-        "env_name": "EntropyEnv-Navigation",
-        "algo": "RecurrentPPO"
+        "total_timesteps": 1_000_000, # Increased timesteps for faster training
+        "n_agents_total": N_ENVS * AGENTS_PER_ENV,
+        "n_envs": N_ENVS,
+        "env_name": "EntropyEnv-Navigation-Multicore",
+        "algo": "RecurrentPPO",
+        "device": "cuda" # Ensure GPU is used
     }
     
     run = wandb.init(
         project="entropy-engine-v2",
-        dir=os.path.join(V2_ROOT, "wandb"), # Save wandb metadata here
+        dir=os.path.join(V2_ROOT, "wandb"),
         config=config,
-        sync_tensorboard=True, # Auto-upload sb3 tensorboard logs
-        monitor_gym=True,      # Auto-upload videos if Gym monitor is used (we use custom though)
+        sync_tensorboard=True,
+        monitor_gym=True,
         save_code=True,
+        name=f"multicore_{int(time.time())}"
     )
     
-    # Training Environment
-    parallel_env = EntropyEnv(nr_agents=config["n_agents"], render_mode=None) 
-    vec_env = PettingZooToVecEnv(parallel_env)
+    # Training Environment (Multicore)
+    print(f"Spawning {N_ENVS} processes with {AGENTS_PER_ENV} agents each...")
+    vec_env = AsyncVectorizedEntropyEnv(
+        n_envs=N_ENVS, 
+        agents_per_env=AGENTS_PER_ENV
+    )
     
-    # Evaluation Environment
+    # Evaluation Environment (Single process for rendering)
     eval_env = EntropyEnv(nr_agents=5, render_mode="rgb_array")
     
     # Setup Logger
@@ -48,7 +57,7 @@ def main():
     
     # Setup Callbacks
     video_path = os.path.join(V2_ROOT, "videos")
-    gif_callback = GifRecorderCallback(eval_env, save_path=video_path, name_prefix=f"lstm_{run.id}")
+    gif_callback = GifRecorderCallback(eval_env, save_path=video_path, name_prefix=f"multicore_{run.id}")
     log_callback = RichLoggerCallback(rich_logger)
     
     models_path = os.path.join(V2_ROOT, "models")
@@ -62,15 +71,19 @@ def main():
     print(f"Action Space: {vec_env.action_space.shape}")
     
     # Model
-    print("Creating RecurrentPPO (LSTM) Model...")
+    print("Creating RecurrentPPO (LSTM) Model on GPU...")
     runs_path = os.path.join(V2_ROOT, "runs")
+    
     model = RecurrentPPO(
         "MlpLstmPolicy", 
         vec_env, 
         verbose=1, 
         learning_rate=3e-4, 
-        n_steps=2048, 
-        batch_size=256,
+        n_steps=512, # 512 * 80 agents = 40960 steps per update? No, n_steps is per env.
+                     # SB3: n_steps * n_envs = buffer size.
+                     # Here n_envs = 80 (agents).
+                     # So 512 * 80 = 40,960 transitions per update.
+        batch_size=4096, # Huge batch size for GPU efficiency
         gamma=0.99,
         tensorboard_log=os.path.join(runs_path, run.id),
         policy_kwargs={
@@ -80,7 +93,7 @@ def main():
         }
     )
     
-    print("Starting Training (LSTM)...")
+    print("Starting Training (Multicore)...")
     try:
         model.learn(
             total_timesteps=config["total_timesteps"], 
@@ -90,14 +103,18 @@ def main():
     except KeyboardInterrupt:
         print("Training interrupted.")
     finally:
+        print("Closing environments...")
         eval_env.close()
         vec_env.close()
         run.finish()
     
     print("Saving Model...")
-    model.save(os.path.join(models_path, f"ppo_lstm_entropy_v2_{run.id}"))
+    model.save(os.path.join(models_path, f"ppo_multicore_entropy_v2_{run.id}"))
     
     print("Done.")
 
 if __name__ == "__main__":
+    # Support for Windows Multiprocessing
+    import multiprocessing
+    multiprocessing.freeze_support()
     main()

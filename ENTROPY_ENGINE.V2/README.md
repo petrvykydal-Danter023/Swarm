@@ -1,83 +1,129 @@
-# 🌀 ENTROPY_ENGINE.V2
+# 🌀 ENTROPY ENGINE V2
 
-**Entropy Engine V2** is a high-performance, 2D Reinforcement Learning (RL) framework designed for training complex swarm behaviors on consumer hardware. It combines accurate physics simulation with efficient parallel training pipelines.
+> **High-performance 2D Reinforcement Learning framework for training swarm behaviors on consumer hardware.**
+
+[![Python 3.10+](https://img.shields.io/badge/Python-3.10%2B-blue.svg)](https://www.python.org/)
+[![Stable-Baselines3](https://img.shields.io/badge/SB3-RecurrentPPO-green.svg)](https://sb3-contrib.readthedocs.io/)
+[![WandB](https://img.shields.io/badge/Logging-WandB-orange.svg)](https://wandb.ai/)
 
 ---
 
-## 🏗 Architecture
+## 🏗️ Architecture
 
-The engine is built on four core pillars:
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                        ENTROPY ENGINE V2                        │
+├─────────────┬─────────────┬─────────────────┬───────────────────┤
+│   core/     │    env/     │    training/    │     shared/       │
+│  ─────────  │  ─────────  │  ─────────────  │  ───────────────  │
+│  • Physics  │  • PettingZoo│  • RecurrentPPO │  • Pygame Render  │
+│  • Entities │  • Rewards   │  • Multicore    │  • Rich Logger    │
+│  (Pymunk)   │  • Sensors   │  • Callbacks    │  • WandB          │
+└─────────────┴─────────────┴─────────────────┴───────────────────┘
+```
 
-1.  **Core (`core/`)**:
-    *   **Physics**: Powered by `Pymunk` (Chipmunk2D). Provides fast, stable rigid-body simulation with collision types, friction, and elasticity.
-    *   **Entities**: Base classes for Agents, Walls, and Goals.
-2.  **Environment (`env/`)**:
-    *   **API**: `PettingZoo` compliant ParallelEnv (multi-agent standard).
-    *   **Logic**: Handles resetting, stepping the physics world, sensor updates, and reward calculation.
-3.  **Training (`training/`)**:
-    *   **Library**: `Stable-Baselines3` (SB3).
-    *   **Algorithm**: `RecurrentPPO` (PPO + LSTM). Agents have memory and "consciousness" of past states.
-    *   **Vectorization**: Custom `PettingZooToVecEnv` wrapper enabling **Parameter Sharing** (one brain controls all 10+ agents).
-4.  **Shared (`shared/`)**:
-    *   **Visualization**: Custom `Pygame` renderer for video generation.
-    *   **Logging**: `Rich` console output and `WandB` cloud integration.
+| Module | Description |
+|--------|-------------|
+| **`core/`** | Physics engine (Pymunk) + Entity classes (Agent, Wall, Goal) |
+| **`env/`** | PettingZoo-compliant ParallelEnv with Lidar sensors and rewards |
+| **`training/`** | SB3 training scripts, multicore wrapper, callbacks |
+| **`shared/`** | Pygame renderer, Rich console logger, WandB integration |
 
 ---
 
 ## 🤖 The Agent
 
-The agents are autonomous entities designed for swarm intelligence tasks.
+### Observations (36D Vector)
+| Component | Dimensions | Description |
+|-----------|------------|-------------|
+| **Lidar** | 32 | Distance to obstacles in 360° (normalized) |
+| **Velocity** | 2 | Current speed (x, y) |
+| **Goal Vector** | 2 | Relative direction to target (ego-centric) |
 
-### 🧠 Inputs (Observations)
-Each agent perceives the world through a 36-dimensional vector:
-*   **Lidar (32 rays):** Distance to obstacles (Walls, other Agents) in a 360° circle.
-*   **Velocity (2 values):** Current linear velocity (x, y).
-*   **Goal Vector (2 values):** Relative vector pointing to their assigned target.
+### Actions (2D Continuous)
+| Output | Range | Description |
+|--------|-------|-------------|
+| **Left Motor** | [-1, 1] | Power to left wheel |
+| **Right Motor** | [-1, 1] | Power to right wheel |
 
-### 🦾 Outputs (Actions)
-*   **Differential Drive (2 values):** Continuous control signals [-1, 1] for Left and Right motor power.
-
-### 🧠 Brain (LSTM)
-*   Agents use a **Long Short-Term Memory (LSTM)** network.
-*   This allows them to remember temporal patterns (e.g., "I was turning left a second ago", "The goal was behind that wall").
-
----
-
-## 🌍 Simulation Environment
-
-*   **World:** Continuous 2D space (800x600).
-*   **Physics Step:** 60 Hz (consistent simulation stability).
-*   **Goal:** Agents must navigate to their dynamically spawned green targets while avoiding collisions with walls (static) and each other (dynamic).
-*   **Rewards:**
-    *   `+` Moving closer to goal.
-    *   `+10` Reaching goal (respawns immediately).
-    *   `-` Time penalty (encourages speed).
+### Brain (LSTM)
+- **Architecture:** MlpLstmPolicy (256 hidden units)
+- **Memory:** Agents remember past states for temporal reasoning
 
 ---
 
-## 🚀 Getting Started
+## 🚀 Training Pipeline
 
-### 1. Prerequisites
+### Parallel Training (Multicore)
+```
+┌────────────────────────────────────────────────────────┐
+│                    MAIN PROCESS                        │
+│  ┌─────────────────────────────────────────────────┐   │
+│  │           RecurrentPPO (GPU)                    │   │
+│  │           Shared Neural Network                 │   │
+│  └─────────────────────────────────────────────────┘   │
+│                         │                              │
+│    ┌────────────────────┼────────────────────┐         │
+│    ▼         ▼          ▼          ▼         ▼         │
+│ ┌─────┐  ┌─────┐   ┌─────┐   ┌─────┐   ┌─────┐        │
+│ │Env 1│  │Env 2│   │Env 3│   │ ... │   │Env 8│        │
+│ │10 ag│  │10 ag│   │10 ag│   │     │   │10 ag│        │
+│ └─────┘  └─────┘   └─────┘   └─────┘   └─────┘        │
+│   CPU      CPU       CPU       CPU       CPU           │
+└────────────────────────────────────────────────────────┘
+         = 80 agents training in parallel
+```
+
+### CTDE Paradigm
+> **Centralized Training, Decentralized Execution**
+
+| Phase | Behavior |
+|-------|----------|
+| **Training** | All 80 agents share ONE neural network (parameter sharing) |
+| **Inference** | Each agent runs independently with local observations only |
+
+---
+
+## 📊 Training Metrics Reference
+
+| Metric | Description | Good Values |
+|--------|-------------|-------------|
+| `fps` | Environment steps per second | Higher = faster training |
+| `loss` | Total loss (policy + value + entropy) | Should decrease |
+| `value_loss` | Critic prediction error | Should decrease |
+| `explained_variance` | How well Critic understands the environment | 0→1 (higher = better) |
+| `entropy_loss` | Exploration encouragement | Gradually decreases |
+| `approx_kl` | Policy change magnitude | < 0.02 (PPO constraint) |
+| `clip_fraction` | Updates clipped by PPO | < 0.2 |
+| `std` | Action randomness | Decreases as agent becomes confident |
+
+---
+
+## 🛠️ Getting Started
+
+### 1. Install Dependencies
 ```bash
 pip install -r ENTROPY_ENGINE.V2/requirements.txt
 ```
 
-### 2. Login to Weights & Biases (Optional but Recommended)
-For cloud logging and video usage:
+### 2. (Optional) Setup WandB
 ```bash
 wandb login
 ```
 
 ### 3. Run Training
-Train a swarm of 10 agents with LSTM memory:
 ```bash
+# Single-core (10 agents)
 python ENTROPY_ENGINE.V2/training/train_lstm.py
+
+# Multi-core (80 agents, 8 processes)
+python ENTROPY_ENGINE.V2/training/train_multicore.py
 ```
 
-### 4. Monitor
-*   **Console:** Live metrics (FPS, Reward) via `Rich`.
-*   **WandB:** Graphs and "Before vs After" GIFs at [wandb.ai](https://wandb.ai).
-*   **Local:** Videos saved in `./videos/`.
+### 4. Monitor Progress
+- **Console:** Rich progress bar + live FPS
+- **WandB:** [wandb.ai/petr-vykydal/entropy-engine-v2](https://wandb.ai/petr-vykydal/entropy-engine-v2)
+- **Local:** GIFs saved to `videos/`
 
 ---
 
@@ -85,9 +131,67 @@ python ENTROPY_ENGINE.V2/training/train_lstm.py
 
 ```
 ENTROPY_ENGINE.V2/
-├── core/           # Physics & Entities (Agent, Wall)
-├── env/            # PettingZoo Environment Logic
-├── training/       # SB3 Scripts & Callbacks
-├── shared/         # Rendering & Logging Utils
+├── core/
+│   ├── entities.py      # Agent, Wall, Goal classes
+│   ├── physics.py       # Pymunk world wrapper
+│   └── world.py         # PhysicsWorld manager
+├── env/
+│   └── entropy_env.py   # PettingZoo ParallelEnv
+├── training/
+│   ├── train_lstm.py    # Single-core training
+│   ├── train_multicore.py # 8-process parallel training
+│   ├── multicore_wrapper.py # AsyncVectorizedEntropyEnv
+│   ├── custom_wrapper.py # PettingZoo → VecEnv adapter
+│   └── callbacks.py     # GIF recording, Rich logging
+├── shared/
+│   ├── rendering.py     # Pygame renderer
+│   └── logger.py        # Rich console logger
+├── models/              # Saved .zip model checkpoints
+├── videos/              # Generated GIFs (start/end/comparison)
+├── runs/                # TensorBoard logs
+├── wandb/               # WandB run metadata
 └── requirements.txt
 ```
+
+---
+
+## 🔧 Configuration
+
+Key hyperparameters in `train_multicore.py`:
+
+```python
+N_ENVS = 8              # Parallel processes
+AGENTS_PER_ENV = 10     # Agents per world
+total_timesteps = 1_000_000
+learning_rate = 3e-4
+n_steps = 512
+batch_size = 4096
+lstm_hidden_size = 256
+```
+
+---
+
+## 📈 Performance
+
+| Metric | Value |
+|--------|-------|
+| **Training Speed** | ~600-1600 FPS |
+| **Parallel Agents** | 80 |
+| **GPU Utilization** | ~25% (bottlenecked by CPU physics) |
+| **Time to 1M steps** | ~25-30 minutes |
+
+---
+
+## 🚧 Roadmap
+
+- [ ] Numba-accelerated Lidar raycasting
+- [ ] Shared memory IPC (replace Pipe)
+- [ ] Inter-agent communication channels
+- [ ] JAX/Brax GPU physics migration
+- [ ] Curriculum learning stages
+
+---
+
+<p align="center">
+  <b>Built with 🧠 by the Entropy Team</b>
+</p>
