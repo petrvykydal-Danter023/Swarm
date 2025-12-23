@@ -16,6 +16,7 @@ from sb3_contrib import RecurrentPPO
 
 def main():
     print("Initializing Live Inference Environment...")
+    pygame.init()
     
     # Live View Settings
     N_AGENTS_SHOW = 10
