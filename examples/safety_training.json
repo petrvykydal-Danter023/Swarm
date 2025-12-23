@@ -20,15 +20,33 @@
         "special_objects": [
             {
                 "type": "obstacle",
-                "x": 50,
-                "y": 50,
-                "radius": 10
+                "x": 40,
+                "y": 30,
+                "radius": 8
             },
             {
                 "type": "obstacle",
-                "x": 70,
+                "x": 60,
+                "y": 70,
+                "radius": 8
+            },
+            {
+                "type": "obstacle",
+                "x": 40,
+                "y": 70,
+                "radius": 8
+            },
+            {
+                "type": "obstacle",
+                "x": 60,
                 "y": 30,
                 "radius": 8
+            },
+            {
+                "type": "obstacle",
+                "x": 50,
+                "y": 50,
+                "radius": 10
             },
             {
                 "type": "goal",
