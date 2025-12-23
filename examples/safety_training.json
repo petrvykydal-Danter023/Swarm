@@ -1,0 +1,58 @@
+{
+    "task_name": "safety_training_demo",
+    "description": "Training agents with Sim2Real safety constraints (collision avoidance, energy efficiency)",
+    "observation_type": "spatial",
+    "action_space_type": "continuous",
+    "env_params": {
+        "world_width": 100,
+        "world_height": 100,
+        "num_agents": 5,
+        "physics": {
+            "friction": 0.1,
+            "dt": 0.1
+        },
+        "spawn_zone": {
+            "x": 10,
+            "y": 10,
+            "w": 20,
+            "h": 80
+        },
+        "special_objects": [
+            {
+                "type": "obstacle",
+                "x": 50,
+                "y": 50,
+                "radius": 10
+            },
+            {
+                "type": "obstacle",
+                "x": 70,
+                "y": 30,
+                "radius": 8
+            },
+            {
+                "type": "goal",
+                "x": 90,
+                "y": 50
+            }
+        ],
+        "reward_code": "# Advanced Sim2Real Reward Function\nreward = 0.0\n\n# 1. Objective: Reach Goal\ngoal = env_state['goals'][0]\ndist = math.sqrt((agent['x']-goal['x'])**2 + (agent['y']-goal['y'])**2)\nreward -= dist / 100.0\nif dist < 5.0:\n    reward += 50.0\n\n# 2. Safety: Collision Avoidance\nmin_dist = 999.0\nfor obs in env_state.get('obstacles', []):\n    d_edge = math.sqrt((agent['x']-obs['x'])**2 + (agent['y']-obs['y'])**2) - obs['radius'] - 2.0 # agent radius approx 2\n    min_dist = min(min_dist, d_edge)\n\n# Penalty for proximity to obstacles\nif min_dist < 5.0:\n    reward -= (5.0 - min_dist) * 0.5 # Proximity warning\n    if min_dist < 0.5:\n        reward -= 10.0 # Collision course!\n\n# 3. Efficiency: Energy Conservation\nspeed = math.sqrt(agent['vx']**2 + agent['vy']**2)\nreward -= speed * 0.05 # Cost of transport\n\n# 4. Hardware Protection: High speed near obstacles\nif min_dist < 5.0 and speed > 0.5:\n    reward -= speed * 2.0 # Slow down near walls!\n",
+        "motor_lag": 1,
+        "packet_loss_prob": 0.1,
+        "comm_range": 60.0,
+        "sensors": [
+            "position",
+            "velocity",
+            "goal_vector",
+            "obstacle_radar",
+            "energy"
+        ]
+    },
+    "training_params": {
+        "algo": "PPO",
+        "total_timesteps": 5000,
+        "learning_rate": 0.0003,
+        "max_episode_steps": 300,
+        "n_envs": 1
+    }
+}

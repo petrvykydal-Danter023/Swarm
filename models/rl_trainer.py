@@ -20,7 +20,7 @@ from stable_baselines3.common.vec_env import DummyVecEnv, SubprocVecEnv
 import sys
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from universal_env import UniversalSwarmEnv, make_env
+from topdown_engine import TopDownSwarmEnv
 from models.swarm_wrapper import SwarmVecEnv, ParallelSwarmVecEnv
 
 
@@ -75,7 +75,7 @@ def unflatten_observations(flat_obs: np.ndarray, num_agents: int) -> np.ndarray:
     return flat_obs
 
 
-class FlattenedSwarmEnv(UniversalSwarmEnv):
+class FlattenedSwarmEnv(TopDownSwarmEnv):
     """
     Wrapper that flattens multi-agent observations/actions for SB3 compatibility.
     
@@ -201,7 +201,7 @@ def train_task(config: dict) -> dict:
         # Create vectorized environment using IPPO Architecture (Decentralized)
         # Use ParallelSwarmVecEnv to run multiple swarms (M) * agents (N)
         def _make_unique_env():
-             return UniversalSwarmEnv(config)
+             return TopDownSwarmEnv(config)
 
         if n_envs > 1:
             env = ParallelSwarmVecEnv(_make_unique_env, n_envs)
@@ -256,7 +256,7 @@ def train_task(config: dict) -> dict:
         # Evaluation and GIF generation
         print("Generating evaluation video...")
         # Use single SwarmVecEnv for eval
-        eval_env_inner = UniversalSwarmEnv(config)
+        eval_env_inner = TopDownSwarmEnv(config)
         eval_env = SwarmVecEnv(eval_env_inner)
         
         frames = []

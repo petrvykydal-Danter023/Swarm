@@ -67,6 +67,7 @@ class TopDownSwarmEnv(gym.Env):
         self.height = config.get("world_height", 100.0)
         self.num_agents = config.get("num_agents", 10)
         self.dt = config.get("dt", 0.1)
+        self.observation_type = config.get("observation_type", "spatial") # Compatibility with rl_trainer
         
         # Physics Params
         self.friction = config.get("friction", 0.2)
@@ -93,6 +94,7 @@ class TopDownSwarmEnv(gym.Env):
         
         # Gym Spaces
         self.action_type = config.get("action_type", "continuous")
+        self.action_space_type = self.action_type # Compatibility
         if self.action_type == "continuous":
             # [vx, vy, grab] + [comm]
             act_dim = 3 + (1 if self.enable_communication else 0)
@@ -107,12 +109,17 @@ class TopDownSwarmEnv(gym.Env):
                 for i in range(self.num_agents):
                     for _ in range(self.motor_lag):
                          self.action_queues[i].append(np.zeros(act_dim, dtype=np.float32))
+            
+            # Action Smoothness (History)
+            self.last_actions = np.zeros((self.num_agents, act_dim), dtype=np.float32)
+
         else:
             # Discrete (No comms support in discrete currently, or need mapping)
             self.action_space = spaces.MultiDiscrete([6] * self.num_agents)
             # Motor lag for discrete not fully impl detail yet, skipping strict queue for now or assuming continuous only for lag
             self.motor_lag = 0 # Force 0 for discrete for now
             self.action_queues = []
+            self.last_actions = None # Not supported for discrete yet
 
         self.observation_space = spaces.Box(
             low=-np.inf, high=np.inf, shape=(self.num_agents, self.obs_dim), dtype=np.float32
@@ -207,7 +214,14 @@ class TopDownSwarmEnv(gym.Env):
         self._integrate_physics()
         self._solve_collisions()
         self._enforce_bounds()
-        return self._get_obs(), self._compute_rewards(), False, self.current_step >= self.max_steps, {}
+        
+        rewards = self._compute_rewards(applied_actions)
+        
+        # Update history
+        if self.action_type == "continuous":
+             self.last_actions = applied_actions.copy()
+             
+        return self._get_obs(), rewards, False, self.current_step >= self.max_steps, {}
 
     def _apply_control(self, actions):
         speed = 1.0
@@ -526,18 +540,28 @@ class TopDownSwarmEnv(gym.Env):
         
         return t
 
-    def _compute_rewards(self):
+    def _compute_rewards(self, current_actions=None):
         rewards = np.zeros(self.num_agents, dtype=np.float32)
         for i, agent in enumerate(self.agents):
             try:
+                # Add action context to agent dict for reward function
+                agent_dict = agent.to_dict()
+                if current_actions is not None and self.action_type == "continuous":
+                     agent_dict['action'] = current_actions[i]
+                     agent_dict['last_action'] = self.last_actions[i]
+                
+                if self.enable_communication:
+                    agent_dict['comm'] = self.comm_signals[i]
+
                 env_state = {
                     "agent_idx": i,
                     "agents": [a.to_dict() for a in self.agents],
                     "payloads": [p.__dict__ for p in self.payloads],
                     "goals": [o.__dict__ for o in self.obstacles if o.type == "goal"],
+                    "obstacles": [o.__dict__ for o in self.obstacles if o.type == "obstacle"],
                     "comm_signals": self.comm_signals
                 }
-                rewards[i] = self.reward_func(agent.to_dict(), env_state, math, np)
+                rewards[i] = self.reward_func(agent_dict, env_state, math, np)
             except: rewards[i] = 0.0
         return rewards
 
