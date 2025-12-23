@@ -579,7 +579,9 @@ class TopDownSwarmEnv(gym.Env):
                     "payloads": [p.__dict__ for p in self.payloads],
                     "goals": [g.__dict__ for g in self.goal_manager.goals], # From Manager
                     "obstacles": [o.__dict__ for o in self.obstacles if o.type == "obstacle"],
-                    "comm_signals": self.comm_signals
+                    "comm_signals": self.comm_signals,
+                    "world_width": self.width,
+                    "world_height": self.height
                 }
                 rewards[i] = self.reward_func(agent_dict, env_state, math, np)
                 

@@ -16,3 +16,6 @@ videos/
 *.egg-info/
 dist/
 build/
+
+models/
+wandb/

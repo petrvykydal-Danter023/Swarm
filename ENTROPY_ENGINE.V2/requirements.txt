@@ -1,0 +1,11 @@
+pymunk
+pettingzoo
+
+pygame
+gymnasium
+shimmy
+moviepy
+sb3-contrib
+rich
+wandb
+tensorboard
