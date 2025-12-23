@@ -76,6 +76,8 @@ class TopDownSwarmEnv(gym.Env):
         self.sensors = config.get("sensors", ["position", "velocity", "goal_vector", "neighbor_vectors"])
         self.enable_communication = config.get("enable_communication", False)
         self.obs_noise_std = config.get("obs_noise_std", 0.0)
+        self.comm_range = config.get("comm_range", 1000.0) # Default: practically unlimited
+        self.packet_loss_prob = config.get("packet_loss_prob", 0.0)
         
         # Entities
         self.agents: List[Agent] = []
@@ -185,8 +187,35 @@ class TopDownSwarmEnv(gym.Env):
                 elif act == 4: ax = 1.0
                 if act == 5: agent.is_grabbing = not agent.is_grabbing
             
+            # Energy Penalty
+            if agent.energy < 0.05:
+                 ax *= 0.2
+                 ay *= 0.2
+            
             agent.vx += ax * speed * self.dt
             agent.vy += ay * speed * self.dt
+            
+            # Energy Consumption & Regen
+            # Params (could be config, using defaults for now matching legacy)
+            drain = 0.0
+            
+            # 1. Movement Cost
+            current_speed = math.sqrt(agent.vx**2 + agent.vy**2)
+            drain += current_speed * 0.005
+            
+            # 2. Grab Cost
+            if agent.is_grabbing:
+                drain += 0.002
+                
+            # 3. Signal Cost
+            if self.enable_communication and self.action_type == "continuous":
+                 # signal is in self.comm_signals[i], updated in step()
+                 sig = self.comm_signals[i]
+                 if abs(sig) > 0.01:
+                     drain += 0.001 * abs(sig)
+            
+            # Apply
+            agent.energy = max(0.0, min(1.0, agent.energy - drain + 0.001))
 
     def _integrate_physics(self):
         # Agents
@@ -323,10 +352,27 @@ class TopDownSwarmEnv(gym.Env):
                               for j in range(self.num_agents) if j != i]
                     others.sort(key=lambda x: x[1])
                     for k in range(3):
-                         if k < len(others):
-                             idx_other = others[k][0]
-                             obs[i, idx+k] = self.comm_signals[idx_other]
+                        if k < len(others):
+                            idx_other, dist = others[k]
+                            
+                            # Range Check
+                            if dist > self.comm_range:
+                                obs[i, idx+k] = 0.0
+                                continue
+                                
+                            # Packet Loss Check
+                            if self.packet_loss_prob > 0 and np.random.random() < self.packet_loss_prob:
+                                obs[i, idx+k] = 0.0
+                                continue
+                            
+                            obs[i, idx+k] = self.comm_signals[idx_other]
                     idx += 3
+                elif sensor == "grabbing_state":
+                    obs[i, idx] = 1.0 if agent.is_grabbing else 0.0
+                    idx += 1
+                elif sensor == "energy":
+                    obs[i, idx] = agent.energy
+                    idx += 1
         
         # Add Noise (Interference)
         if self.obs_noise_std > 0:
