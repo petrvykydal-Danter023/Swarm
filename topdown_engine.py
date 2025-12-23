@@ -67,22 +67,22 @@ class TopDownSwarmEnv(gym.Env):
             
         # World Params
         self.width = self.config.get("world_width", 100.0)
-        self.height = config.get("world_height", 100.0)
-        self.num_agents = config.get("num_agents", 10)
-        self.dt = config.get("dt", 0.1)
-        self.observation_type = config.get("observation_type", "spatial") # Compatibility with rl_trainer
+        self.height = self.config.get("world_height", 100.0)
+        self.num_agents = self.config.get("num_agents", 10)
+        self.dt = self.config.get("dt", 0.1)
+        self.observation_type = self.config.get("observation_type", "spatial") # Compatibility with rl_trainer
         
         # Physics Params
-        self.friction = config.get("friction", 0.2)
-        self.restitution = config.get("restitution", 0.5)
-        self.payload_friction = config.get("payload_friction", 0.1)
+        self.friction = self.config.get("friction", 0.2)
+        self.restitution = self.config.get("restitution", 0.5)
+        self.payload_friction = self.config.get("payload_friction", 0.1)
         
         # Sensory & Comms
-        self.sensors = config.get("sensors", ["position", "velocity", "goal_vector", "neighbor_vectors"])
-        self.enable_communication = config.get("enable_communication", False)
-        self.obs_noise_std = config.get("obs_noise_std", 0.0)
-        self.comm_range = config.get("comm_range", 1000.0) # Default: practically unlimited
-        self.packet_loss_prob = config.get("packet_loss_prob", 0.1)
+        self.sensors = self.config.get("sensors", ["position", "velocity", "goal_vector", "neighbor_vectors"])
+        self.enable_communication = self.config.get("enable_communication", False)
+        self.obs_noise_std = self.config.get("obs_noise_std", 0.0)
+        self.comm_range = self.config.get("comm_range", 1000.0) # Default: practically unlimited
+        self.packet_loss_prob = self.config.get("packet_loss_prob", 0.1)
         
         # Entities
         self.agents: List[Agent] = []

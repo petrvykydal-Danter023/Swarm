@@ -54,7 +54,7 @@
                 "y": 50
             }
         ],
-        "reward_code": "# Advanced Sim2Real Reward Function\nreward = 0.0\n\n# 1. Objective: Reach Goal\ngoal = env_state['goals'][0]\ndist = math.sqrt((agent['x']-goal['x'])**2 + (agent['y']-goal['y'])**2)\nreward -= dist / 100.0\nif dist < 5.0:\n    reward += 50.0\n\n# 2. Safety: Collision Avoidance\nmin_dist = 999.0\nfor obs in env_state.get('obstacles', []):\n    d_edge = math.sqrt((agent['x']-obs['x'])**2 + (agent['y']-obs['y'])**2) - obs['radius'] - 2.0\n    min_dist = min(min_dist, d_edge)\n\nif min_dist < 5.0:\n    reward -= (5.0 - min_dist) * 0.5\n    if min_dist < 0.5:\n        reward -= 10.0\n\n# 3. Efficiency: Energy & Smoothness\nspeed = math.sqrt(agent['vx']**2 + agent['vy']**2)\nreward -= speed * 0.05 # Cost of transport\n\n# 4. Anti-Jerk (Smoothness)\nif 'last_action' in agent and 'action' in agent:\n    diff = agent['action'] - agent['last_action']\n    jerk = np.sum(np.abs(diff))\n    reward -= jerk * 0.2 # Penalty for shaky hands\n\n# 5. Stall Protection\naction_mag = 0.0\nif 'action' in agent:\n    action_mag = math.sqrt(agent['action'][0]**2 + agent['action'][1]**2)\nif action_mag > 0.8 and speed < 0.1:\n    reward -= 5.0 # Burnout prevention\n\n# 6. Comm Cost\nif 'comm' in agent:\n    reward -= abs(agent['comm']) * 0.1\n",
+        "reward_code": "# Advanced Sim2Real Reward Function\nreward = 0.0\n\n# 1. Objective: Reach Goal\ngoal = env_state['goals'][0]\ndist = math.sqrt((agent['x']-goal['x'])**2 + (agent['y']-goal['y'])**2)\nreward -= dist / 50.0  # Stronger gradient (was 100)\nif dist < 5.0:\n    reward += 50.0\n\n# 2. Safety: Collision Avoidance\nmin_dist = 999.0\nfor obs in env_state.get('obstacles', []):\n    d_edge = math.sqrt((agent['x']-obs['x'])**2 + (agent['y']-obs['y'])**2) - obs['radius'] - 2.0\n    min_dist = min(min_dist, d_edge)\n\nif min_dist < 3.0:  # Reduced warning range (was 5.0)\n    reward -= (3.0 - min_dist) * 0.5\n    if min_dist < 0.5:\n        reward -= 10.0\n\n# 3. Efficiency: Energy & Smoothness\nspeed = math.sqrt(agent['vx']**2 + agent['vy']**2)\nreward -= speed * 0.05 # Cost of transport\n\n# 4. Anti-Jerk (Smoothness)\nif 'last_action' in agent and 'action' in agent:\n    diff = agent['action'] - agent['last_action']\n    jerk = np.sum(np.abs(diff))\n    reward -= jerk * 0.2 # Penalty for shaky hands\n\n# 5. Stall Protection\naction_mag = 0.0\nif 'action' in agent:\n    action_mag = math.sqrt(agent['action'][0]**2 + agent['action'][1]**2)\nif action_mag > 0.8 and speed < 0.1:\n    reward -= 5.0 # Burnout prevention\n\n# 6. Comm Cost\nif 'comm' in agent:\n    reward -= abs(agent['comm']) * 0.1\n",
         "motor_lag": 1,
         "packet_loss_prob": 0.1,
         "comm_range": 60.0,
@@ -68,7 +68,7 @@
     },
     "training_params": {
         "algo": "PPO",
-        "total_timesteps": 20000,
+        "total_timesteps": 65000,
         "learning_rate": 0.0003,
         "max_episode_steps": 300,
         "n_envs": 1,
