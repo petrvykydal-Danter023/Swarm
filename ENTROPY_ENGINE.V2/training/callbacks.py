@@ -138,15 +138,91 @@ class RichLoggerCallback(BaseCallback):
         self.last_time = 0
         
     def _on_training_start(self):
+        # Capture starting timesteps for offset calculation
+        self.rich_logger.start_offset = self.model.num_timesteps
         self.rich_logger.start()
         
     def _on_step(self) -> bool:
         if self.num_timesteps % 100 == 0:
-            fps = int(self.locals.get("fps", 0)) if self.locals.get("fps") else 0
-            # Try to get reward info if available
-            # info = self.locals.get("infos")
-            self.rich_logger.update(self.num_timesteps, fps, 0.0)
+            # Extract metrics from logger
+            fps = 0
+            mean_reward = 0.0
+            loss = 0.0
+            explained_var = 0.0
+            
+            # SB3 stores metrics in self.logger.name_to_value
+            if hasattr(self.model, 'logger') and self.model.logger is not None:
+                name_to_value = getattr(self.model.logger, 'name_to_value', {})
+                fps = int(name_to_value.get('time/fps', 0))
+                loss = name_to_value.get('train/loss', 0.0)
+                explained_var = name_to_value.get('train/explained_variance', 0.0)
+                mean_reward = name_to_value.get('rollout/ep_rew_mean', 0.0) or 0.0
+            
+            self.rich_logger.update(
+                self.num_timesteps, 
+                fps, 
+                mean_reward,
+                loss=loss,
+                explained_var=explained_var
+            )
         return True
     
     def _on_training_end(self):
         self.rich_logger.finish()
+
+
+class RollingCheckpointCallback(BaseCallback):
+    """
+    Saves a single checkpoint that gets overwritten each time.
+    Checkpoint is deleted after training completes successfully.
+    """
+    
+    def __init__(self, save_dir: str, save_freq: int = 50000, verbose: int = 0):
+        super().__init__(verbose)
+        self.save_dir = save_dir
+        self.save_freq = save_freq
+        self.checkpoint_path = os.path.join(save_dir, "checkpoint.zip")
+        self.state_path = os.path.join(save_dir, "checkpoint_state.json")
+        os.makedirs(save_dir, exist_ok=True)
+        
+    def _on_step(self) -> bool:
+        if self.num_timesteps % self.save_freq == 0:
+            # Save model checkpoint (overwrites previous)
+            self.model.save(self.checkpoint_path)
+            
+            # Save state info
+            import json
+            state = {
+                "timesteps": self.num_timesteps,
+                "time": __import__("time").strftime("%Y-%m-%d %H:%M:%S"),
+            }
+            with open(self.state_path, 'w') as f:
+                json.dump(state, f)
+                
+            if self.verbose > 0:
+                print(f"Checkpoint saved at {self.num_timesteps} steps")
+        return True
+    
+    def _on_training_end(self):
+        # Training completed successfully - remove checkpoint
+        self.cleanup()
+        
+    def cleanup(self):
+        """Remove checkpoint files."""
+        if os.path.exists(self.checkpoint_path):
+            os.remove(self.checkpoint_path)
+        if os.path.exists(self.state_path):
+            os.remove(self.state_path)
+    
+    @staticmethod
+    def load_checkpoint(save_dir: str):
+        """Load checkpoint if exists. Returns (model_path, timesteps) or (None, 0)."""
+        import json
+        checkpoint_path = os.path.join(save_dir, "checkpoint.zip")
+        state_path = os.path.join(save_dir, "checkpoint_state.json")
+        
+        if os.path.exists(checkpoint_path) and os.path.exists(state_path):
+            with open(state_path, 'r') as f:
+                state = json.load(f)
+            return checkpoint_path, state.get("timesteps", 0)
+        return None, 0

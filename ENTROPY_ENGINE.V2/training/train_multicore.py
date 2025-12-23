@@ -8,7 +8,7 @@ sys.path.append(V2_ROOT)
 
 from env.entropy_env import EntropyEnv
 from training.multicore_wrapper import AsyncVectorizedEntropyEnv
-from training.callbacks import GifRecorderCallback, RichLoggerCallback
+from training.callbacks import GifRecorderCallback, RichLoggerCallback, RollingCheckpointCallback
 from shared.logger import RichLogger
 from sb3_contrib import RecurrentPPO
 import wandb
@@ -81,8 +81,15 @@ def main():
     # Evaluation Environment (Single process for rendering)
     eval_env = EntropyEnv(nr_agents=5, render_mode="rgb_array")
     
-    # Setup Logger
-    rich_logger = RichLogger(config["total_timesteps"])
+    # Setup Logger with full features
+    wandb_url = f"https://wandb.ai/petr-vykydal/entropy-engine-v2/runs/{run_name}"
+    rich_logger = RichLogger(
+        total_timesteps=config["total_timesteps"],
+        run_name=run_name,
+        wandb_url=wandb_url,
+        save_dir=os.path.join(V2_ROOT, "checkpoints"),
+        config=config
+    )
     
     # Setup Callbacks
     video_path = os.path.join(V2_ROOT, "videos")
@@ -96,36 +103,53 @@ def main():
         verbose=2
     )
     
+    # Checkpoint callback for auto-resume
+    checkpoint_dir = os.path.join(V2_ROOT, "checkpoints")
+    checkpoint_callback = RollingCheckpointCallback(
+        save_dir=checkpoint_dir,
+        save_freq=50000,  # Save every 50k steps
+        verbose=1
+    )
+    
+    # Check for existing checkpoint (crash recovery)
+    checkpoint_path, checkpoint_steps = RollingCheckpointCallback.load_checkpoint(checkpoint_dir)
+    
     print(f"Observation Space: {vec_env.observation_space.shape}")
     print(f"Action Space: {vec_env.action_space.shape}")
     
-    
-    # Model - Load existing for fine-tuning
-    print("Loading Existing RecurrentPPO Model for Fine-tuning...")
     runs_path = os.path.join(V2_ROOT, "runs")
     
-    # Path to the model we just trained
-    prev_model = "ppo_multicore_entropy_v2_map1ykof"
-    model_path = os.path.join(models_path, prev_model)
-    
-    model = RecurrentPPO.load(
-        model_path, 
-        env=vec_env,
-        # Update hyperparameters if needed (e.g. learning rate)
-        learning_rate=3e-4,
-        # Important: Ensure tensorboard log continues or starts new
-        tensorboard_log=os.path.join(runs_path, run_name),
-        # We need to set device manually sometimes when loading
-        device="cuda"
-    )
-    
-    print(f"Loaded: {prev_model}")
+    # Model loading - either from checkpoint (crash recovery) or base model
+    if checkpoint_path:
+        print(f"🔄 Resuming from checkpoint at {checkpoint_steps} steps...")
+        model = RecurrentPPO.load(
+            checkpoint_path,
+            env=vec_env,
+            learning_rate=3e-4,
+            tensorboard_log=os.path.join(runs_path, run_name),
+            device="cuda"
+        )
+        print(f"Loaded checkpoint: {checkpoint_path}")
+    else:
+        # No checkpoint - load base model for fine-tuning
+        print("Loading Base RecurrentPPO Model for Fine-tuning...")
+        prev_model = "ppo_multicore_entropy_v2_map1ykof"
+        model_path = os.path.join(models_path, prev_model)
+        
+        model = RecurrentPPO.load(
+            model_path, 
+            env=vec_env,
+            learning_rate=3e-4,
+            tensorboard_log=os.path.join(runs_path, run_name),
+            device="cuda"
+        )
+        print(f"Loaded base model: {prev_model}")
     
     print(f"Starting Training ({run_name} - Fine-tuning)...")
     try:
         model.learn(
             total_timesteps=config["total_timesteps"], 
-            callback=[log_callback, gif_callback, wandb_callback],
+            callback=[log_callback, gif_callback, wandb_callback, checkpoint_callback],
             progress_bar=False,
             reset_num_timesteps=False # Continue counting steps
         )

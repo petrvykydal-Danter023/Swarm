@@ -1,0 +1,22 @@
+{
+  "run_name": "test_dashboard",
+  "wandb_url": "https://wandb.ai/petr-vykydal/entropy-engine-v2/runs/test",
+  "last_timesteps": 6492200,
+  "best_reward": -Infinity,
+  "config": {
+    "total_timesteps": 100000,
+    "n_envs": 4,
+    "agents_per_env": 5,
+    "learning_rate": 0.0003,
+    "policy": "MlpLstmPolicy"
+  },
+  "milestones_reached": [
+    100,
+    10,
+    75,
+    50,
+    25,
+    90
+  ],
+  "start_time": 1766527074.976717
+}

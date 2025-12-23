@@ -134,6 +134,58 @@ python ENTROPY_ENGINE.V2/training/train_multicore.py
 
 ---
 
+## 🔄 Auto-Resume & Checkpointing
+
+> **Crash recovery pro dlouhé tréninky na consumer hardware.**
+
+### Jak to funguje
+```
+┌─────────────────────────────────────────────┐
+│           START TRÉNINKU                     │
+└─────────────────┬───────────────────────────┘
+                  │
+                  ▼
+        ┌─────────────────────┐
+        │ Existuje checkpoint? │
+        └─────────┬───────────┘
+                  │
+        ┌─────────┴─────────┐
+        │                   │
+        ▼                   ▼
+   ✅ ANO               ❌ NE
+        │                   │
+        ▼                   ▼
+  Načti checkpoint    Načti base model
+  (crash recovery)   (prev_model)
+        │                   │
+        └─────────┬─────────┘
+                  │
+                  ▼
+          Pokračuj v tréninku
+                  │
+                  ▼
+    ┌─────────────────────────┐
+    │  Trénink dokončen       │
+    │  - Ulož finální model   │
+    │  - Smaž checkpoint      │
+    └─────────────────────────┘
+```
+
+### Klíčové body
+| Vlastnost | Hodnota |
+|-----------|---------|
+| **Checkpoint interval** | Každých 50k kroků |
+| **Lokace** | `checkpoints/checkpoint.zip` |
+| **Přepisování** | Vždy se přepíše starý na nový |
+| **Po dokončení** | Checkpoint se automaticky smaže |
+
+### Obnovení po pádu
+Stačí spustit trénink znovu:
+```bash
+python training/train_multicore.py
+# 🔄 Resuming from checkpoint at 150000 steps...
+```
+
 ## 📂 Directory Structure
 
 ```
@@ -154,6 +206,7 @@ ENTROPY_ENGINE.V2/
 │   ├── rendering.py     # Pygame renderer
 │   └── logger.py        # Rich console logger
 ├── models/              # Saved .zip model checkpoints
+├── checkpoints/         # Rolling checkpoint for crash recovery
 ├── videos/              # Generated GIFs (start/end/comparison)
 ├── runs/                # TensorBoard logs
 ├── wandb/               # WandB run metadata
