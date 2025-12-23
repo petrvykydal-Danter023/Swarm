@@ -30,7 +30,7 @@ def main():
     
     # Load Model
     # Explicitly using the latest multicore model we found
-    model_name = "ppo_multicore_entropy_v2_map1ykof" 
+    model_name = "entropy_v2_1.zip" 
     model_path = os.path.join(V2_ROOT, "models", model_name)
     
     print(f"Loading Model: {model_path} ...")
