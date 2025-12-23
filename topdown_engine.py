@@ -77,7 +77,7 @@ class TopDownSwarmEnv(gym.Env):
         self.enable_communication = config.get("enable_communication", False)
         self.obs_noise_std = config.get("obs_noise_std", 0.0)
         self.comm_range = config.get("comm_range", 1000.0) # Default: practically unlimited
-        self.packet_loss_prob = config.get("packet_loss_prob", 0.0)
+        self.packet_loss_prob = config.get("packet_loss_prob", 0.1)
         
         # Entities
         self.agents: List[Agent] = []
@@ -175,7 +175,8 @@ class TopDownSwarmEnv(gym.Env):
         speed = 1.0
         for i, agent in enumerate(self.agents):
             if self.action_type == "continuous":
-                ax, ay, grab = actions[i]
+                # actions[i] can be 3 or 4 dims. Grab first 3.
+                ax, ay, grab = actions[i][:3]
                 agent.is_grabbing = (grab > 0.5)
             else:
                 sc = actions[i] if np.isscalar(actions[i]) else actions[i].item()
@@ -290,7 +291,49 @@ class TopDownSwarmEnv(gym.Env):
             dvy = c2.vy - c1.vy
             vn = dvx * nx + dvy * ny
             if vn > 0: return 
+
+            # Check for Grabbing (Sticky Collision)
+            # Check for Grabbing (Sticky Collision)
+            is_grabbing_interaction = False
             
+            # Helper to check if obj is an agent that is grabbing
+            def is_grabber(obj):
+                return hasattr(obj, 'is_grabbing') and obj.is_grabbing
+
+            # Check if c1 is grabbing c2 (and c2 is not another agent with same ID, though ID collision shouldn't happen in sim, test setup might cause it)
+            # Actually, we just need to know if ONE is grabbing and the other is dynamic.
+            # We want Agent -> Payload OR Agent -> Agent connection.
+            
+            if is_grabber(c1) and getattr(c2, 'id', -100) != getattr(c1, 'id', -200):
+                 is_grabbing_interaction = True
+            if is_grabber(c2) and getattr(c1, 'id', -100) != getattr(c2, 'id', -200):
+                 is_grabbing_interaction = True
+
+            # Fix for test case where Payload ID might clash with Agent ID (both 0)
+            # We can check if types are different.
+            if is_grabber(c1) and not is_grabber(c2): is_grabbing_interaction = True
+            if is_grabber(c2) and not is_grabber(c1): is_grabbing_interaction = True
+            
+            # If both are agents and grabbing, they stick.
+            if is_grabber(c1) and is_grabber(c2): is_grabbing_interaction = True
+            
+            if is_grabbing_interaction and dynamic_b:
+                # Inelastic Collision (Stick Together)
+                # Weighted average velocity (conservation of momentum)
+                # v_final = (m1*v1 + m2*v2) / (m1 + m2)
+                
+                final_vx = (m1 * c1.vx + m2 * c2.vx) / total_inv_mass # Wait, total_inv_mass is 1/m1+1/m2.
+                # Mass sum
+                total_mass = m1 + m2
+                final_vx = (m1 * c1.vx + m2 * c2.vx) / total_mass
+                final_vy = (m1 * c1.vy + m2 * c2.vy) / total_mass
+                
+                c1.vx = final_vx
+                c1.vy = final_vy
+                c2.vx = final_vx
+                c2.vy = final_vy
+                return
+
             j = -(1 + self.restitution) * vn
             j /= total_inv_mass
             c1.vx -= j * nx * inv_m1
@@ -382,23 +425,68 @@ class TopDownSwarmEnv(gym.Env):
         return obs
 
     def _compute_radar(self, agent, targets):
+        """
+        Simulate LiDAR with 8 rays. Raycast against all rigid targets (obstacles).
+        Returns distance to ANY first hit (normalized 0..1).
+        """
         radar = np.ones(8, dtype=np.float32)
         max_range = 30.0
         angles = [0, math.pi/4, math.pi/2, 3*math.pi/4, math.pi, 5*math.pi/4, 3*math.pi/2, 7*math.pi/4]
         
-        for t in targets:
-            dx = t.x - agent.x
-            dy = t.y - agent.y
-            dist = math.sqrt(dx*dx + dy*dy)
-            if dist < max_range:
-                angle = math.atan2(dy, dx)
-                if angle < 0: angle += 2*math.pi
-                for d in range(8):
-                    diff = abs(angles[d] - angle)
-                    diff = min(diff, 2*math.pi - diff)
-                    if diff < math.pi/8: # 22.5 deg cone
-                        radar[d] = min(radar[d], dist / max_range)
+        # Define rays in world space
+        rays = []
+        for ang in angles:
+             dx = math.cos(ang)
+             dy = math.sin(ang)
+             rays.append((dx, dy))
+             
+        # For each ray, find nearest intersection
+        for i, (rdx, rdy) in enumerate(rays):
+             closest_dist = max_range
+             
+             for t in targets:
+                  # Check if target is close enough to potentially hit
+                  # (Optimization: simple dist check first)
+                  dist_sq = (t.x - agent.x)**2 + (t.y - agent.y)**2
+                  # If target is further than max_range + radius, skip
+                  if dist_sq > (max_range + t.radius)**2: 
+                      continue
+                      
+                  hit_dist = self._intersect_ray_circle(agent.x, agent.y, rdx, rdy, t.x, t.y, t.radius)
+                  if hit_dist is not None and hit_dist < closest_dist:
+                      closest_dist = hit_dist
+             
+             radar[i] = closest_dist / max_range
+
         return radar
+
+    def _intersect_ray_circle(self, ox, oy, dx, dy, cx, cy, r):
+        """
+        Ray-Circle Intersection.
+        Ray: P = O + t*D
+        Circle: |P - C|^2 = r^2
+        """
+        fx = ox - cx
+        fy = oy - cy
+        
+        a = dx*dx + dy*dy # Should be 1 if normalized
+        b = 2 * (fx*dx + fy*dy)
+        c = (fx*fx + fy*fy) - r*r
+        
+        discriminant = b*b - 4*a*c
+        if discriminant < 0:
+            return None
+            
+        discriminant = math.sqrt(discriminant)
+        t1 = (-b - discriminant) / (2*a)
+        t2 = (-b + discriminant) / (2*a)
+        
+        # We want smallest positive t
+        t = None
+        if t1 >= 0: t = t1
+        if t2 >= 0 and (t is None or t2 < t): t = t2
+        
+        return t
 
     def _compute_rewards(self):
         rewards = np.zeros(self.num_agents, dtype=np.float32)
@@ -445,6 +533,15 @@ def user_reward(agent, env_state, math, np):
             draw_circle(p.x, p.y, p.radius, p.color)
 
         for agent in self.agents:
+            if agent.is_grabbing:
+                 # Draw white outline (radius + 1)
+                 # Since we draw by pixelscaling, let's just draw slightly larger white circle behind?
+                 # Or manually via draw_circle logic.
+                 # Let's use simple logic: draw larger white circle first
+                 cx, cy = int(agent.x*5), int((self.height-agent.y)*5)
+                 rr = int((agent.radius + 0.8)*5) # slightly larger
+                 img[max(0,cy-rr+1):min(h,cy+rr-1), max(0,cx-rr+1):min(w,cx+rr-1)] = (255, 255, 255)
+            
             draw_circle(agent.x, agent.y, agent.radius, agent.color)
             
         return img

@@ -27,3 +27,11 @@ Význam signálů vzniká evolučně během tréninku (Reinforcement Learning):
 *   **Comm Range**: Signál má omezený dosah (nastavitelné v configu). Agenti mimo dosah slyší `0.0`.
 *   **Packet Loss**: Simulace rušení. S určitou pravděpodobností signál nedorazí (přijat jako `0.0`).
 *   **Cost**: Vysílání stojí energii (`Energy Cost = |signal| * 0.001 * dt`). To motivuje agenty, aby "nekřičeli" zbytečně, pokud to nepřináší užitek.
+
+## Sim2Real a Robustnost
+Zavedení **Packet Loss** (např. 10% šance ztráty) je klíčové pro přenos do reality.
+*   **V simulaci bez šumu**: Agenti se naučí spoléhat na to, že zpráva *vždy* dorazí. V realitě pak selžou při prvním výpadku WiFi/rádia.
+*   **S Packet Lossem**: Agenti jsou nuceni vyvinout robustní strategie, jako je:
+    *   **Redundance**: Opakování důležité zprávy vícekrát za sebou.
+    *   **Potvrzování (ACK)**: Soused odpoví signálem, že zprávu přijal (pokud se to naučí).
+    *   **Držení stavu**: Vysílání stavu kontinuálně, místo jednorázového impulzu.

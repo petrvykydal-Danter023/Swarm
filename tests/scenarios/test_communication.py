@@ -16,6 +16,7 @@ class TestCommunication(unittest.TestCase):
             "world_width": 200,
             "world_height": 200,
             "enable_communication": True,
+            "packet_loss_prob": 0.0, # Ensure no loss for range test
             "comm_range": 50.0,
             "sensors": ["neighbor_signals"] # only signals to simplify index
         }
