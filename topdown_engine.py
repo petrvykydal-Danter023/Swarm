@@ -60,10 +60,13 @@ class TopDownSwarmEnv(gym.Env):
 
     def __init__(self, config: dict):
         super().__init__()
-        self.config = config
-        
+        # Flatten config if env_params exists (compatibility with nested JSON)
+        self.config = config.copy()
+        if "env_params" in config:
+            self.config.update(config["env_params"])
+            
         # World Params
-        self.width = config.get("world_width", 100.0)
+        self.width = self.config.get("world_width", 100.0)
         self.height = config.get("world_height", 100.0)
         self.num_agents = config.get("num_agents", 10)
         self.dt = config.get("dt", 0.1)
@@ -595,33 +598,89 @@ def user_reward(agent, env_state, math, np):
         return loc["user_reward"]
 
     def render(self, mode="rgb_array"):
-        h, w = int(self.height * 5), int(self.width * 5)
-        img = np.zeros((h, w, 3), dtype=np.uint8) + 30
+        """
+        Robust rendering using OpenCV.
+        Draws agents, obstacles, goals, and annotations.
+        """
+        import cv2
         
-        def draw_circle(x, y, r, c):
-            cx, cy = int(x*5), int((self.height-y)*5)
-            rr = int(r*5)
-            y_min, y_max = max(0, cy-rr), min(h, cy+rr)
-            x_min, x_max = max(0, cx-rr), min(w, cx+rr)
-            img[max(0,cy-rr+1):min(h,cy+rr-1), max(0,cx-rr+1):min(w,cx+rr-1)] = c
+        scale = 5
+        h, w = int(self.height * scale), int(self.width * scale)
+        # Background: Dark Gray/Black for contrast
+        img = np.zeros((h, w, 3), dtype=np.uint8) + 30 
+        
+        # Draw Grid (faint)
+        grid_spacing = 10 * scale
+        for x in range(0, w, grid_spacing):
+            cv2.line(img, (x, 0), (x, h), (40, 40, 40), 1)
+        for y in range(0, h, grid_spacing):
+            cv2.line(img, (0, y), (w, y), (40, 40, 40), 1)
 
+        # Draw Obstacles & Goals
         for obs in self.obstacles:
-            col = (0, 255, 0) if obs.type == "goal" else (100, 100, 100)
-            draw_circle(obs.x, obs.y, obs.radius, col)
-            
-        for p in self.payloads:
-            draw_circle(p.x, p.y, p.radius, p.color)
+            cx, cy = int(obs.x * scale), int((self.height - obs.y) * scale)
+            r = int(obs.radius * scale)
+            if obs.type == "goal":
+                # Green filled + lighter outline
+                cv2.circle(img, (cx, cy), r, (0, 150, 0), -1)
+                cv2.circle(img, (cx, cy), r, (0, 200, 0), 2)
+                # Label
+                cv2.putText(img, "GOAL", (cx - 15, cy + 5), 
+                           cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
+            else:
+                # Gray Obstacle
+                cv2.circle(img, (cx, cy), r, (100, 100, 100), -1)
+                cv2.circle(img, (cx, cy), r, (150, 150, 150), 2)
 
+        # Draw Payloads
+        for p in self.payloads:
+            cx, cy = int(p.x * scale), int((self.height - p.y) * scale)
+            r = int(p.radius * scale)
+            cv2.circle(img, (cx, cy), r, p.color, -1)
+            cv2.circle(img, (cx, cy), r, (255, 255, 255), 1)
+
+        # Draw Agents
         for agent in self.agents:
+            cx, cy = int(agent.x * scale), int((self.height - agent.y) * scale)
+            r = int(agent.radius * scale)
+            
+            # Grabbing Aura
             if agent.is_grabbing:
-                 # Draw white outline (radius + 1)
-                 # Since we draw by pixelscaling, let's just draw slightly larger white circle behind?
-                 # Or manually via draw_circle logic.
-                 # Let's use simple logic: draw larger white circle first
-                 cx, cy = int(agent.x*5), int((self.height-agent.y)*5)
-                 rr = int((agent.radius + 0.8)*5) # slightly larger
-                 img[max(0,cy-rr+1):min(h,cy+rr-1), max(0,cx-rr+1):min(w,cx+rr-1)] = (255, 255, 255)
+                cv2.circle(img, (cx, cy), r + 3, (255, 255, 255), 1)
+                
+            # Body
+            # Convert color to BGR for OpenCV if tuple is RGB
+            # Assuming agent.color is RGB, cv2 uses BGR.
+            # My logic set colors as (255, 0, 0) for Red. In BGR that is (0, 0, 255).
+            # So I should flip.
+            b, g, r_val = agent.color[2], agent.color[1], agent.color[0]
+            # Actually Agent default was (0,0,255) in my init edit?
+            # Wait, `Agent(..., color=(0,0,255))`.
+            # If I treat that as RGB -> Blue is (0,0,255).
+            # If I treat as BGR for CV2 -> Red is (0,0,255).
+            # Let's standardize: Internal state is RGB.
+            # Render converts to BGR.
             
-            draw_circle(agent.x, agent.y, agent.radius, agent.color)
+            # Default Blue (0, 0, 255) RGB.
+            # Orange (255, 165, 0) RGB.
+            # Red (255, 0, 0) RGB.
             
+            color_bgr = (agent.color[2], agent.color[1], agent.color[0])
+            
+            cv2.circle(img, (cx, cy), r, color_bgr, -1)
+            
+            # Direction Indicator (Velocity)
+            vel_mag = math.sqrt(agent.vx**2 + agent.vy**2)
+            if vel_mag > 0.1:
+                end_x = int(cx + (agent.vx / vel_mag) * r * 1.5)
+                end_y = int(cy - (agent.vy / vel_mag) * r * 1.5) # Flip Y for image coords
+                cv2.line(img, (cx, cy), (end_x, end_y), (255, 255, 255), 2)
+            
+            # ID
+            # cv2.putText(img, str(agent.id), (cx, cy), cv2.FONT_HERSHEY_SIMPLEX, 0.3, (255,255,255), 1)
+
+        # Overlay Info
+        cv2.putText(img, f"Step: {self.current_step}", (10, 20), 
+                   cv2.FONT_HERSHEY_SIMPLEX, 0.6, (200, 200, 200), 1)
+                   
         return img
