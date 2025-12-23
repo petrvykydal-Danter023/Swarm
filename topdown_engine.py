@@ -185,7 +185,7 @@ class TopDownSwarmEnv(gym.Env):
                  for _ in range(self.motor_lag):
                       self.action_queues[i].append(np.zeros(act_dim, dtype=np.float32))
 
-    def step(self, actions):
+    def step(self, actions, verbose=False):
         self.current_step += 1
         
         applied_actions = actions
@@ -221,6 +221,13 @@ class TopDownSwarmEnv(gym.Env):
         if self.action_type == "continuous":
              self.last_actions = applied_actions.copy()
              
+        if verbose:
+            print(f"--- Step {self.current_step} ---")
+            for i, agent in enumerate(self.agents):
+                speed = math.sqrt(agent.vx**2 + agent.vy**2)
+                act_str = np.array2string(applied_actions[i], precision=2, suppress_small=True)
+                print(f"Agent {i}: Spd={speed:.3f} | Act={act_str} | Rew={rewards[i]:.3f}")
+
         return self._get_obs(), rewards, False, self.current_step >= self.max_steps, {}
 
     def _apply_control(self, actions):
