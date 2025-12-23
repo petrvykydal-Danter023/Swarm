@@ -55,7 +55,38 @@ class Renderer:
             # Draw outline
             pygame.draw.circle(self.screen, (30, 130, 70), pos, int(goal.radius), 2)
 
+        # Signal Overlay (Transparent)
+        signal_surf = pygame.Surface((self.width, self.height), pygame.SRCALPHA)
+        
         # Draw Agents
+        for agent in agents.values():
+            pos = (int(agent.position.x), int(agent.position.y))
+            
+            # Draw Communication Signals (Waves)
+            # Ch1: Cyan, Ch2: Magenta
+            s1, s2 = agent.current_signal
+            
+            if s1 > 0.05:
+                radius = int(agent.radius * 2 + (s1 * 30))
+                alpha = int(min(255, s1 * 150))
+                pygame.draw.circle(signal_surf, (0, 255, 255, alpha), pos, radius)
+                # Outer ring
+                pygame.draw.circle(signal_surf, (0, 255, 255, alpha), pos, radius, 2)
+                
+            if s2 > 0.05:
+                # If both signals active, draw second one slightly larger/smaller or blended
+                radius = int(agent.radius * 2.5 + (s2 * 30))
+                alpha = int(min(255, s2 * 150))
+                pygame.draw.circle(signal_surf, (255, 0, 255, alpha), pos, radius)
+                pygame.draw.circle(signal_surf, (255, 0, 255, alpha), pos, radius, 2)
+
+            # Draw Lidar Rays (Optional - can be noisy)
+            # self._draw_lidar(agent)
+            
+        # Blit signals
+        self.screen.blit(signal_surf, (0,0))
+        
+        # Draw Agents Body (after signals so agent is on top)
         for agent in agents.values():
             pos = (int(agent.position.x), int(agent.position.y))
             

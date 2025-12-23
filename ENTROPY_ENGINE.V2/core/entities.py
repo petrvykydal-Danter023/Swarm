@@ -53,6 +53,7 @@ class Agent(Entity):
         self.lidar_rays = 32
         self.lidar_range = 300.0
         self.sensors = np.zeros(self.lidar_rays, dtype=np.float32)
+        self.current_signal = np.zeros(2, dtype=np.float32) # [Tx1, Tx2]
         super().__init__(world, position)
         
     def _init_physics(self, position, angle):
@@ -66,6 +67,9 @@ class Agent(Entity):
         self.shape.friction = 0.7
         self.shape.collision_type = COLLISION_AGENT
         
+    def set_signal(self, s1: float, s2: float):
+        self.current_signal[:] = [s1, s2]
+
     def control(self, left_motor: float, right_motor: float):
         # Differential drive logic
         # Motors apply force at offsets
