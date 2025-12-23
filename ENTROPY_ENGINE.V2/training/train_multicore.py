@@ -17,14 +17,16 @@ from wandb.integration.sb3 import WandbCallback
 def main():
     print("Initializing Multicore Environment...")
     
-    # 8 cores * 10 agents = 80 agents learning in parallel
-    N_ENVS = 8 
+    # Ryzen 5 5600X (6 Cores, 12 Threads)
+    # We use 10 processes to leave 2 threads for OS/GPU driver overhead
+    N_ENVS = 10 
     AGENTS_PER_ENV = 10
+    # Total Agents = 100
     
     # Init WandB
     config = {
         "policy_type": "MlpLstmPolicy",
-        "total_timesteps": 1_000_000, # Increased timesteps for faster training
+        "total_timesteps": 2_000_000, # Extended training for larger swarm
         "n_agents_total": N_ENVS * AGENTS_PER_ENV,
         "n_envs": N_ENVS,
         "env_name": "EntropyEnv-Navigation-Multicore",
@@ -70,35 +72,35 @@ def main():
     print(f"Observation Space: {vec_env.observation_space.shape}")
     print(f"Action Space: {vec_env.action_space.shape}")
     
-    # Model
-    print("Creating RecurrentPPO (LSTM) Model on GPU...")
+    
+    # Model - Load existing for fine-tuning
+    print("Loading Existing RecurrentPPO Model for Fine-tuning...")
     runs_path = os.path.join(V2_ROOT, "runs")
     
-    model = RecurrentPPO(
-        "MlpLstmPolicy", 
-        vec_env, 
-        verbose=1, 
-        learning_rate=3e-4, 
-        n_steps=512, # 512 * 80 agents = 40960 steps per update? No, n_steps is per env.
-                     # SB3: n_steps * n_envs = buffer size.
-                     # Here n_envs = 80 (agents).
-                     # So 512 * 80 = 40,960 transitions per update.
-        batch_size=4096, # Huge batch size for GPU efficiency
-        gamma=0.99,
+    # Path to the model we just trained
+    prev_model = "ppo_multicore_entropy_v2_xuoj0qxz"
+    model_path = os.path.join(models_path, prev_model)
+    
+    model = RecurrentPPO.load(
+        model_path, 
+        env=vec_env,
+        # Update hyperparameters if needed (e.g. learning rate)
+        learning_rate=3e-4,
+        # Important: Ensure tensorboard log continues or starts new
         tensorboard_log=os.path.join(runs_path, run.id),
-        policy_kwargs={
-            "lstm_hidden_size": 256,
-            "n_lstm_layers": 1,
-            "enable_critic_lstm": True
-        }
+        # We need to set device manually sometimes when loading
+        device="cuda"
     )
     
-    print("Starting Training (Multicore)...")
+    print(f"Loaded: {prev_model}")
+    
+    print("Starting Training (Multicore - Fine-tuning)...")
     try:
         model.learn(
             total_timesteps=config["total_timesteps"], 
             callback=[log_callback, gif_callback, wandb_callback],
-            progress_bar=False 
+            progress_bar=False,
+            reset_num_timesteps=False # Continue counting steps
         )
     except KeyboardInterrupt:
         print("Training interrupted.")
