@@ -35,7 +35,7 @@ class Renderer:
                 
             self.clock = pygame.time.Clock()
 
-    def render_frame(self, agents: Dict[str, Agent], goals: Dict[str, Goal], walls: List[Wall]) -> np.ndarray:
+    def render_frame(self, agents: Dict[str, Agent], goals: Dict[str, Goal], walls: List[Wall], comm_state=None) -> np.ndarray:
         self.init_window()
         
         self.screen.fill(self.COLOR_BG)
@@ -100,6 +100,10 @@ class Renderer:
             end_pos = agent.position + pymunk.Vec2d(agent.radius, 0).rotated(agent.angle)
             pygame.draw.line(self.screen, self.COLOR_AGENT_DIR, pos, (int(end_pos.x), int(end_pos.y)), 2)
 
+        # Draw Communication (Aura & Token)
+        if comm_state:
+            self._draw_communication(agents, comm_state)
+
         if self.render_mode == "human":
             pygame.display.flip()
             self.clock.tick(60)
@@ -108,9 +112,47 @@ class Renderer:
             # Return RGB Array
             return pygame.surfarray.array3d(self.screen).transpose([1, 0, 2])
 
+    def _draw_communication(self, agents: Dict[str, Agent], comm_state):
+        # 1. Broadcast Aura
+        aura_surface = pygame.Surface((self.width, self.height), pygame.SRCALPHA)
+        
+        for i, msg in enumerate(comm_state.broadcast_messages):
+            if msg.msg_type != 0: # Not SILENCE
+                agent_key = f"agent_{i}"
+                if agent_key in agents:
+                    agent = agents[agent_key]
+                    pos = (int(agent.position.x), int(agent.position.y))
+                    
+                    # Draw Aura
+                    hue = (msg.msg_type * 30) % 360
+                    color = pygame.Color(0)
+                    color.hsla = (hue, 50, 50, 30) # 30% alpha
+                    pygame.draw.circle(aura_surface, color, pos, 40)
+                    
+        self.screen.blit(aura_surface, (0,0))
+        
+        # 2. Token Indicator
+        if comm_state.token_holder != -1:
+            holder_idx = comm_state.token_holder
+            holder_key = f"agent_{holder_idx}"
+            
+            if holder_key in agents:
+                agent = agents[holder_key]
+                pos = (int(agent.position.x), int(agent.position.y))
+                
+                # Draw Star/Icon for Token Holder
+                pygame.draw.circle(self.screen, (255, 215, 0), pos, 8) # Gold center
+                
+                # Draw Line to Target
+                target_idx = comm_state.token_message.target_agent
+                if target_idx != -1:
+                    target_key = f"agent_{target_idx}"
+                    if target_key in agents:
+                        target = agents[target_key]
+                        t_pos = (int(target.position.x), int(target.position.y))
+                        pygame.draw.line(self.screen, (255, 215, 0), pos, t_pos, 3)
+
     def _draw_lidar(self, agent: Agent):
-        # Re-calculate lidar rays for visuals
-        # This duplicates logic but effectively Visualizing what agent "sees" if we just draw lines
         pass
 
     def close(self):

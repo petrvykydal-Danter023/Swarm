@@ -53,8 +53,16 @@ class Agent(Entity):
         self.lidar_rays = 32
         self.lidar_range = 300.0
         self.sensors = np.zeros(self.lidar_rays, dtype=np.float32)
-        self.current_signal = np.zeros(2, dtype=np.float32) # [Tx1, Tx2]
+        # Signal: [prio, type, target, role, p1, p2, p3, p4] = 8 floats
+        self.current_signal = np.zeros(8, dtype=np.float32)
         super().__init__(world, position)
+        
+    def set_signal(self, comm_vector):
+        """
+        comm_vector: Flat array from action space
+        [priority, msg_type, target, role, payload_0, payload_1, payload_2, payload_3]
+        """
+        self.current_signal = comm_vector
         
     def _init_physics(self, position, angle):
         mass = 1.0

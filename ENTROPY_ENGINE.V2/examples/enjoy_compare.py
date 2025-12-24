@@ -65,11 +65,22 @@ def main():
             if event.type == pygame.QUIT:
                 running = False
                 
+        # Helper for Shape Mismatch (Legacy Models)
+        def predict_safe(model, obs, state, starts):
+            expected = model.observation_space.shape[0]
+            current = obs.shape[0]
+            if current > expected:
+                obs = obs[:expected]
+            return model.predict(obs, state=state, episode_start=starts, deterministic=True)
+
         # Model 1 actions
         actions1 = {}
         for i, agent_id in enumerate(env1.agents):
             obs = obs1[agent_id]
-            action, lstm_states1 = model1.predict(obs, state=lstm_states1, episode_start=episode_starts1[i:i+1], deterministic=True)
+            action, lstm_states1 = predict_safe(model1, obs, lstm_states1, episode_starts1[i:i+1])
+            # Pad for V3 Env (Action 2->4)
+            if len(action) == 2:
+                action = np.append(action, [0.0, 0.0]).astype(np.float32)
             actions1[agent_id] = action
             episode_starts1[i] = False
             
@@ -77,7 +88,10 @@ def main():
         actions2 = {}
         for i, agent_id in enumerate(env2.agents):
             obs = obs2[agent_id]
-            action, lstm_states2 = model2.predict(obs, state=lstm_states2, episode_start=episode_starts2[i:i+1], deterministic=True)
+            action, lstm_states2 = predict_safe(model2, obs, lstm_states2, episode_starts2[i:i+1])
+            # Pad for V3 Env (Action 2->4)
+            if len(action) == 2:
+                action = np.append(action, [0.0, 0.0]).astype(np.float32)
             actions2[agent_id] = action
             episode_starts2[i] = False
             

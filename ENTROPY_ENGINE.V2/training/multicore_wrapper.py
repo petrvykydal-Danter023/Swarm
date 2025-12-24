@@ -10,6 +10,7 @@ from typing import List, Dict, Any
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from env.entropy_env import EntropyEnv
+from training.comm_wrapper import CommunicationRewardWrapper
 from stable_baselines3.common.vec_env import VecEnv
 from gymnasium import spaces
 
@@ -17,7 +18,7 @@ class Command(Enum):
     RESET = 1
     STEP = 2
     CLOSE = 3
-    GET_ATTR = 4
+    ENV_METHOD = 5
 
 def worker_process(remote, config, shm_name, shm_shape, shm_dtype, worker_idx):
     """
@@ -38,6 +39,7 @@ def worker_process(remote, config, shm_name, shm_shape, shm_dtype, worker_idx):
         worker_obs_buffer = shm_array[worker_idx]
         
         env = EntropyEnv(**config)
+        env = CommunicationRewardWrapper(env)
         
         # Cache sorted agent keys to ensure consistent order
         # Assuming agent keys don't change names (agent_0, agent_1...)
@@ -75,6 +77,24 @@ def worker_process(remote, config, shm_name, shm_shape, shm_dtype, worker_idx):
                 if hasattr(env, attr_name):
                     val = getattr(env, attr_name)
                     remote.send((True, val))
+                else:
+                    remote.send((False, None))
+
+            elif cmd == Command.ENV_METHOD:
+                # Call arbitrary method
+                method_name, method_args, method_kwargs = data
+                # env is CommunicationRewardWrapper -> env.env -> EntropyEnv
+                # We need to find where the method exists.
+                # It might be on wrapper or inner.
+                target = env
+                if hasattr(target, method_name):
+                    method = getattr(target, method_name)
+                    res = method(*method_args, **method_kwargs)
+                    remote.send((True, res))
+                elif hasattr(target.env, method_name): # Check inner
+                     method = getattr(target.env, method_name)
+                     res = method(*method_args, **method_kwargs)
+                     remote.send((True, res))
                 else:
                     remote.send((False, None))
                 
@@ -233,7 +253,30 @@ class AsyncVectorizedEntropyEnv(VecEnv):
         return [False] * self.total_agents
 
     def env_method(self, method_name, *method_args, indices=None, **method_kwargs):
-        raise NotImplementedError("Not supported in async wrapper")
+        """
+        Call a method on the wrapped environments. Dictionary args are supported via kwargs.
+        Note: We broadcast to ALL envs (indices unimplemented for now for simplicity).
+        Returns list of results (one per env, replicated for agents).
+        """
+        for remote in self.remotes:
+            # Send command
+            remote.send((Command.ENV_METHOD, (method_name, method_args, method_kwargs)))
+            
+        results = []
+        for remote in self.remotes:
+            success, res = remote.recv()
+            if not success:
+               print(f"Warning: Method {method_name} failed on worker.")
+            # Replicate result for all agents in that env?? 
+            # Or just return list of env results?
+            # SB3 expects list of length n_envs (or total_envs).
+            # If we mask, we return relevant.
+            # Here we return N_envs results, but maybe we should return N_agents results to match vecenv api strictly.
+            # But usually env_method is used for global config.
+            # Let's return result per ENV.
+            results.append(res)
+            
+        return results
 
     def get_attr(self, attr_name, indices=None):
         """Return attribute from vectorized environment."""

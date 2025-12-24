@@ -26,6 +26,10 @@ class GifRecorderCallback(BaseCallback):
         self._save_gif(self.frames_start, f"{self.name_prefix}_start.gif")
 
     def _on_step(self) -> bool:
+        if self.num_timesteps % 50_000 == 0:
+            print(f"Recording Periodic Agent Behavior (Step {self.num_timesteps})...")
+            frames = self.record_episode()
+            self._save_gif(frames, f"{self.name_prefix}_step_{self.num_timesteps}.gif")
         return True
 
     def _on_training_end(self):
@@ -54,7 +58,7 @@ class GifRecorderCallback(BaseCallback):
             # This is slow but fine for recording
             if isinstance(obs, dict):
                  for agent_id, agent_obs in obs.items():
-                    action, _states = self.model.predict(agent_obs, deterministic=True)
+                    action, _states = self.model.predict(agent_obs, deterministic=False)
                     actions[agent_id] = action
             else:
                 # Should not happen in ParallelEnv but handling just in case
@@ -226,3 +230,116 @@ class RollingCheckpointCallback(BaseCallback):
                 state = json.load(f)
             return checkpoint_path, state.get("timesteps", 0)
         return None, 0
+
+class EntropySchedulingCallback(BaseCallback):
+    """
+    Adjusts the entropy coefficient over time to transition from Exploration to Exploitation.
+    Schedule:
+    - Phase 1 (0 - 30%): High Entropy (explore)
+    - Phase 2 (30% - 70%): Linear Decay
+    - Phase 3 (70% - 100%): Low Entropy (exploit/stabilize)
+    """
+    def __init__(self, high_ent=0.1, low_ent=0.01, total_timesteps=1_000_000, verbose=0):
+        super().__init__(verbose)
+        self.high_ent = high_ent
+        self.low_ent = low_ent
+        self.total_timesteps = total_timesteps
+        
+    def _on_step(self) -> bool:
+        progress = self.num_timesteps / self.total_timesteps
+        
+        if progress < 0.3:
+            current_ent = self.high_ent
+        elif progress < 0.7:
+            # Linear decay from high to low
+            # P from 0.3 to 0.7 -> ratio 0.0 to 1.0
+            ratio = (progress - 0.3) / 0.4
+            current_ent = self.high_ent - ratio * (self.high_ent - self.low_ent)
+        else:
+            current_ent = self.low_ent
+            
+        # Update model
+        # PPO stores ent_coef in the object
+        self.model.ent_coef = current_ent
+        
+        # Log
+        self.logger.record("train/ent_coef", current_ent)
+        
+        return True
+
+class CurriculumCallback(BaseCallback):
+    """
+    Increases environment difficulty over time.
+    Level 1: 0 - 33%
+    Level 2: 33% - 66%
+    Level 3: 66% - 100%
+    """
+    def __init__(self, total_timesteps=1_000_000, verbose=0):
+        super().__init__(verbose)
+        self.total_timesteps = total_timesteps
+        self.current_difficulty = 1
+        
+    def _on_step(self) -> bool:
+        progress = self.num_timesteps / self.total_timesteps
+        
+        if progress < 0.33:
+            target_difficulty = 1
+        elif progress < 0.66:
+            target_difficulty = 2
+        else:
+            target_difficulty = 3
+            
+        if target_difficulty > self.current_difficulty:
+            self.current_difficulty = target_difficulty
+            if self.verbose:
+                print(f"Curriculum Update: Setting Difficulty to Level {self.current_difficulty}")
+            
+            # Broadcast to all envs via async wrapper
+            # wrapper -> AsyncVectorizedEntropyEnv
+            # env is VecNormalize -> env.venv is AsyncVectorizedEntropyEnv
+            # But wait, we wrapped training env with VecNormalize.
+            # callback.training_env gives access.
+            
+            env = self.training_env
+            # Unwrap if needed or call method if forwarded
+            # SB3 VecEnv usually doesn't forward arbit methods unless wrapper.
+            # But VecNormalize might not.
+            
+            # Traverse wrappers to find AsyncVectorizedEntropyEnv
+            # Actually VecNormalize has .env or .venv?
+            # Let's try .env_method, VecNormalize might pass it through or we unwrap.
+            
+            try:
+                env.env_method("set_difficulty", self.current_difficulty)
+            except AttributeError:
+                # If wrapped deeply, try unwrapping
+                if hasattr(env, "venv"):
+                    env.venv.env_method("set_difficulty", self.current_difficulty)
+                else:
+                    print("Could not propagate Difficulty change!")
+            
+            self.logger.record("train/difficulty_level", self.current_difficulty)
+            
+        return True
+
+class VocabLoggerCallback(BaseCallback):
+    def _on_step(self) -> bool:
+        if self.num_timesteps % 1000 == 0:
+             infos = self.locals.get("infos", [])
+             total_counts = np.zeros(32, dtype=np.int32)
+             for info in infos:
+                 if isinstance(info, dict):
+                     for agent_info in info.values(): 
+                         if isinstance(agent_info, dict) and "vocab_counts" in agent_info:
+                             total_counts += agent_info["vocab_counts"]
+             
+             if np.sum(total_counts) > 0:
+                 try:
+                     import wandb
+                     if wandb.run is not None:
+                        data = [[i, int(total_counts[i])] for i in range(32)]
+                        table = wandb.Table(data=data, columns=["vocab_id", "count"])
+                        wandb.log({"vocab_dist": wandb.plot.bar(table, "vocab_id", "count", title="Vocabulary Distribution")})
+                 except:
+                     pass
+        return True
