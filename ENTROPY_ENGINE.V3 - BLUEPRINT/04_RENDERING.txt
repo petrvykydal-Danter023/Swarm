@@ -1,0 +1,369 @@
+================================================================================
+                    04_RENDERING.txt
+                    Vizualizační Systém ("Camera Server")
+================================================================================
+
+================================================================================
+1. FILOSOFIE: HEADLESS-FIRST
+================================================================================
+
+V2 PROBLÉM:
+  - pygame.display.update() blokuje trénink.
+  - Rendering a simulace jsou svázané v jedné smyčce.
+  - Nelze trénovat bez otevřeného okna (na serverech problém).
+
+V3 ŘEŠENÍ:
+  - Simulace VŽDY běží headless (bez grafiky).
+  - Rendering je VOLITELNÝ "server", ke kterému se připojíš.
+  - Můžeš mít N kamer (více pohledů najednou).
+
+ARCHITEKTURA:
+
+    ┌─────────────────────────────────────────────────────────────────┐
+    │                     ENTROPY CORE (Headless)                     │
+    │                   Běží @ 10,000+ FPS                            │
+    └─────────────────────────────────────┬───────────────────────────┘
+                                          │ WorldState (ZeroMQ/SharedMem)
+                    ┌─────────────────────┴─────────────────────┐
+                    │                                           │
+                    ▼                                           ▼
+    ┌───────────────────────────────┐           ┌───────────────────────────────┐
+    │         CAMERA 1              │           │         CAMERA 2              │
+    │   (Vispy, full scene)         │           │   (DearPyGui, stats only)     │
+    │   Běží @ 60 FPS               │           │   Běží @ 30 FPS               │
+    └───────────────────────────────┘           └───────────────────────────────┘
+
+================================================================================
+2. TECHNOLOGIE VOLBY
+================================================================================
+
+VISPY (Doporučeno pro 2D/3D scénu):
+  - OpenGL-based, Python bindings
+  - Zvládne 10,000+ bodů/čar snadno
+  - Nízká latence
+
+DEAR PYGUI (Doporučeno pro UI/Dashboardy):
+  - ImGui wrapper pro Python
+  - Skvělé pro grafy, slidery, real-time stats
+  - Kombinovatelné s Vispy
+
+MODERNGL (Alternativa):
+  - Ještě nižší level než Vispy
+  - Pro maximální kontrolu
+
+================================================================================
+3. RENDER SERVER ARCHITEKTURA
+================================================================================
+
+```python
+import zmq
+import numpy as np
+from dataclasses import dataclass
+from typing import Optional
+
+@dataclass
+class RenderFrame:
+    """Data pro jeden snímek vizualizace."""
+    timestep: int
+    agent_positions: np.ndarray   # [N, 2]
+    agent_angles: np.ndarray      # [N]
+    agent_colors: np.ndarray      # [N, 3]
+    agent_messages: np.ndarray    # [N, MSG_DIM] - pro aura vizualizaci
+    goal_positions: np.ndarray    # [N, 2]
+    object_positions: np.ndarray  # [O, 2]
+    wall_segments: np.ndarray     # [W, 4]
+    # Metriky
+    rewards: np.ndarray           # [N]
+    fps: float
+
+class RenderServer:
+    """
+    Přijímá WorldState a posílá do připojených kamer.
+    Běží v samostatném procesu.
+    """
+    def __init__(self, port: int = 5555):
+        self.context = zmq.Context()
+        self.socket = self.context.socket(zmq.PUB)
+        self.socket.bind(f"tcp://*:{port}")
+        print(f"Render Server listening on port {port}")
+        
+    def publish_frame(self, frame: RenderFrame):
+        """Serializuj a pošli frame všem subscriberům."""
+        # Použij msgpack nebo pickle pro serializaci
+        data = self._serialize(frame)
+        self.socket.send(data)
+        
+    def _serialize(self, frame: RenderFrame) -> bytes:
+        import pickle
+        return pickle.dumps(frame)
+
+class RenderClient:
+    """
+    Přijímá frames a vykresluje.
+    Běží v samostatném procesu/vlákně.
+    """
+    def __init__(self, server_address: str = "tcp://localhost:5555"):
+        self.context = zmq.Context()
+        self.socket = self.context.socket(zmq.SUB)
+        self.socket.connect(server_address)
+        self.socket.setsockopt_string(zmq.SUBSCRIBE, "")
+        
+    def receive_frame(self, timeout_ms: int = 100) -> Optional[RenderFrame]:
+        """Přijmi frame od serveru."""
+        if self.socket.poll(timeout_ms):
+            data = self.socket.recv()
+            return self._deserialize(data)
+        return None
+        
+    def _deserialize(self, data: bytes) -> RenderFrame:
+        import pickle
+        return pickle.loads(data)
+```
+
+================================================================================
+4. VISPY SCENE
+================================================================================
+
+```python
+from vispy import app, scene
+import numpy as np
+
+class EntropyViewer:
+    """
+    2D vizualizace simulace pomocí Vispy.
+    """
+    def __init__(self, width=800, height=600):
+        self.canvas = scene.SceneCanvas(
+            keys='interactive',
+            size=(width, height),
+            title='Entropy Engine V3',
+            show=True
+        )
+        
+        self.view = self.canvas.central_widget.add_view()
+        self.view.camera = scene.PanZoomCamera(aspect=1)
+        
+        # === VISUAL ELEMENTS ===
+        
+        # Agenti jako kolečka
+        self.agents_visual = scene.visuals.Markers(parent=self.view.scene)
+        
+        # Cíle jako hvězdy
+        self.goals_visual = scene.visuals.Markers(parent=self.view.scene)
+        
+        # Zdi jako čáry
+        self.walls_visual = scene.visuals.Line(parent=self.view.scene)
+        
+        # Komunikační aury (kruhy kolem agentů)
+        self.auras_visual = scene.visuals.Ellipse(parent=self.view.scene)
+        
+        # Komunikační čáry (kdo komu mluví)
+        self.comm_lines = scene.visuals.Line(parent=self.view.scene)
+        
+    def update(self, frame: RenderFrame):
+        """Aktualizuje vizuály z nového framu."""
+        
+        # Agenti
+        self.agents_visual.set_data(
+            pos=np.column_stack([frame.agent_positions, np.zeros(len(frame.agent_positions))]),
+            face_color=frame.agent_colors / 255.0,
+            size=20,
+            edge_color='white'
+        )
+        
+        # Cíle
+        self.goals_visual.set_data(
+            pos=np.column_stack([frame.goal_positions, np.zeros(len(frame.goal_positions))]),
+            face_color=(0, 1, 0, 0.5),
+            size=30,
+            symbol='star'
+        )
+        
+        # Zdi
+        wall_points = []
+        for w in frame.wall_segments:
+            wall_points.extend([(w[0], w[1], 0), (w[2], w[3], 0)])
+        self.walls_visual.set_data(
+            pos=np.array(wall_points),
+            connect='segments',
+            color='gray',
+            width=3
+        )
+        
+        self.canvas.update()
+    
+    def run(self):
+        app.run()
+```
+
+================================================================================
+5. AURA VIZUALIZACE (Komunikace)
+================================================================================
+
+V2 měl základní auru. V3 rozšíříme:
+
+```python
+def compute_aura_params(message: np.ndarray) -> dict:
+    """
+    Převeď zprávu na vizuální parametry aury.
+    
+    Returns:
+        color: RGBA tuple
+        radius: float
+        pulse: float (animace)
+    """
+    token = np.argmax(message[:32])  # Diskrétní token
+    payload = message[32:36]
+    
+    # Barva podle tokenu
+    COLORS = {
+        0: (0.5, 0.5, 0.5, 0.2),   # SILENCE - šedá, průhledná
+        3: (0.0, 0.5, 1.0, 0.6),   # CARRYING - modrá
+        7: (0.0, 1.0, 0.2, 0.8),   # FOUND_TARGET - zelená, jasná
+        2: (1.0, 0.0, 0.0, 0.8),   # DANGER - červená
+        1: (1.0, 1.0, 0.0, 0.7),   # HELP - žlutá
+    }
+    color = COLORS.get(token, (0.8, 0.8, 0.8, 0.3))
+    
+    # Radius podle urgence (payload[2])
+    urgency = payload[2] if len(payload) > 2 else 0.5
+    radius = 20 + urgency * 30  # 20-50 px
+    
+    # Pulse efekt (pro animaci)
+    pulse = 1.0 + 0.2 * np.sin(time.time() * 5)  # Pulzuje 5x za sekundu
+    
+    return {'color': color, 'radius': radius * pulse}
+```
+
+================================================================================
+6. DEBUG OVERLAY
+================================================================================
+
+Překrývající informace pro debugging:
+
+- Agent ID čísla
+- Aktuální token (text nad agentem)
+- Velocity vektory (šipky)
+- Lidar paprsky (volitelné, náročné)
+- Reward hodnoty (barva pozadí agenta)
+
+```python
+def draw_debug_overlay(frame: RenderFrame, show_lidars=False, show_vectors=True):
+    """
+    Vykreslí debug informace.
+    Volat po hlavním update().
+    """
+    for i, pos in enumerate(frame.agent_positions):
+        # Agent ID
+        draw_text(pos + [0, 15], f"#{i}")
+        
+        # Token
+        token = np.argmax(frame.agent_messages[i][:32])
+        if token != 0:  # Ne-SILENCE
+            draw_text(pos + [0, -20], TOKEN_NAMES.get(token, f"T{token}"))
+        
+        if show_vectors:
+            # Velocity arrow
+            vel = frame.agent_velocities[i] if hasattr(frame, 'agent_velocities') else [0, 0]
+            draw_arrow(pos, pos + np.array(vel) * 0.1)
+```
+
+================================================================================
+7. GIF/VIDEO EXPORT
+================================================================================
+
+Pro sdílení výsledků:
+
+```python
+import imageio
+
+class VideoRecorder:
+    def __init__(self, output_path: str, fps: int = 30):
+        self.writer = imageio.get_writer(output_path, fps=fps)
+        
+    def add_frame(self, canvas):
+        """Přidá aktuální snímek do videa."""
+        img = canvas.render()  # Vispy render to numpy
+        self.writer.append_data(img)
+        
+    def close(self):
+        self.writer.close()
+```
+
+================================================================================
+8. INTEGRACE S TRÉNINKEM
+================================================================================
+
+```python
+def train_with_optional_viz(cfg):
+    env = create_env(cfg)
+    render_server = RenderServer(port=5555) if cfg.enable_render else None
+    
+    for episode in range(cfg.num_episodes):
+        state = env.reset()
+        
+        for step in range(cfg.max_steps):
+            action = agent.act(state)
+            state, reward, done, info = env.step(action)
+            
+            # Posílej frame jen každých N kroků (šetří bandwidth)
+            if render_server and step % 10 == 0:
+                frame = state_to_render_frame(state)
+                render_server.publish_frame(frame)
+            
+            if done:
+                break
+```
+
+================================================================================
+9. GHOST MODE (Hand of God vizualizace)
+================================================================================
+
+Pro debugging Hand of God modulu - ukazuje co by udělal Expert vs. AI:
+
+```python
+class GhostRenderer:
+    """Vykresluje 'ducha' - co by udělal expert vs. co dělá AI."""
+    
+    def __init__(self, opacity=0.5):
+        self.opacity = opacity
+        self.ghost_visual = scene.visuals.Markers(parent=self.view.scene)
+        self.divergence_lines = scene.visuals.Line(parent=self.view.scene)
+        
+    def update(self, frame, ai_actions, expert_actions):
+        # Predikuj kam by šla AI
+        ai_next = predict_positions(frame.agent_positions, ai_actions)
+        
+        # Predikuj kam by šel Expert
+        expert_next = predict_positions(frame.agent_positions, expert_actions)
+        
+        # Vykresli ghosty (zelené = expert)
+        self.ghost_visual.set_data(
+            pos=np.column_stack([expert_next, np.zeros(len(expert_next))]),
+            face_color=(0, 1, 0, self.opacity),
+            size=15,
+            symbol='diamond'
+        )
+        
+        # Čáry ukazující divergenci
+        lines = []
+        colors = []
+        for i in range(len(ai_next)):
+            dist = np.linalg.norm(ai_next[i] - expert_next[i])
+            if dist > 5:  # Threshold
+                lines.append([ai_next[i][0], ai_next[i][1], 0])
+                lines.append([expert_next[i][0], expert_next[i][1], 0])
+                colors.append((1, 0, 0, min(dist/50, 1.0)))  # Červenější = větší divergence
+                
+        if lines:
+            self.divergence_lines.set_data(
+                pos=np.array(lines),
+                connect='segments',
+                color=colors
+            )
+```
+
+================================================================================
+                            KONEC RENDERING
+           Pokračuj čtením 05_TRAINING.txt pro tréninkový pipeline.
+================================================================================

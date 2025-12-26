@@ -1,0 +1,487 @@
+================================================================================
+                    10_EXTENSIBILITY_EXAMPLES.txt
+                    Jak Přidat Nové Věci Bez Rozbití Enginu
+================================================================================
+
+Tento dokument ukazuje KONKRÉTNÍ příklady rozšíření V3 architektury.
+Každý příklad demonstruje, které soubory vytvořit/upravit a co se NEROZBIJE.
+
+================================================================================
+PŘÍKLAD 1: POHYBLIVÝ CÍL (Moving Target)
+================================================================================
+
+ZADÁNÍ: Chci, aby se cíl pohyboval a agenti ho museli následovat.
+
+KROK 1: Přidej komponentu
+-------------------------
+```python
+# entropy/components/moving_goal.py (NOVÝ SOUBOR)
+
+from dataclasses import dataclass
+import jax.numpy as jnp
+
+@dataclass
+class MovingGoalComponent:
+    """Cíl, který se pohybuje."""
+    movement_type: str        # "patrol", "random", "flee", "orbit"
+    speed: float = 2.0
+    waypoints: jnp.ndarray = None  # [num_waypoints, 2] pro patrol
+    current_waypoint_idx: int = 0
+    flee_radius: float = 100.0     # Pro flee: utíkej když agent blíž
+    orbit_center: jnp.ndarray = None  # Pro orbit: střed kruhu
+    orbit_radius: float = 50.0
+```
+
+KROK 2: Přidej systém
+---------------------
+```python
+# entropy/systems/moving_goal_system.py (NOVÝ SOUBOR)
+
+import jax
+import jax.numpy as jnp
+from ..core.world import WorldState
+
+class MovingGoalSystem:
+    """Aktualizuje pozice pohyblivých cílů."""
+    
+    @staticmethod
+    @jax.jit
+    def update(state: WorldState, dt: float) -> WorldState:
+        # Pro každý goal s MovingGoalComponent...
+        
+        # PATROL: Jdi k dalšímu waypointu
+        # RANDOM: Náhodný směr každých N kroků
+        # FLEE: Utíkej od nejbližšího agenta
+        # ORBIT: Kružnicový pohyb
+        
+        new_goal_positions = compute_new_positions(state, dt)
+        
+        return state.replace(goal_positions=new_goal_positions)
+```
+
+KROK 3: Zaregistruj systém
+--------------------------
+```python
+# entropy/core/simulation.py (ÚPRAVA - přidej import a volání)
+
+from ..systems.moving_goal_system import MovingGoalSystem
+
+def step(state, actions, dt):
+    state = PhysicsSystem.update(state, actions, dt)
+    state = MovingGoalSystem.update(state, dt)  # <-- PŘIDÁNO
+    state = CommunicationSystem.update(state)
+    state = RewardSystem.update(state)
+    return state
+```
+
+CO SE NEROZBIJE:
+  ✅ PhysicsSystem - stále počítá kolize agentů
+  ✅ RewardSystem - stále měří vzdálenost agent ↔ goal (jen se goal hýbe)
+  ✅ RenderingSystem - stále vykresluje goals na goal_positions
+  ✅ CommunicationSystem - agenti mohou stále říct "FOUND_TARGET"
+  ✅ Training - PPO stále optimalizuje reward
+
+================================================================================
+PŘÍKLAD 2: ROLE AGENTŮ (Scout, Carrier, Defender)
+================================================================================
+
+ZADÁNÍ: Chci různé typy agentů s různými schopnostmi.
+
+KROK 1: Přidej komponentu
+-------------------------
+```python
+# entropy/components/role.py (NOVÝ SOUBOR)
+
+from dataclasses import dataclass
+from enum import Enum
+
+class AgentRole(Enum):
+    SCOUT = "scout"       # Rychlý, daleko vidí, nízká kapacita
+    CARRIER = "carrier"   # Pomalý, nese hodně
+    DEFENDER = "defender" # Střední, odolný
+    LEADER = "leader"     # Speciální komunikační schopnosti
+
+@dataclass
+class RoleComponent:
+    role: AgentRole = AgentRole.SCOUT
+    team_id: int = 0
+    
+    # Modifikátory (relativní k základu)
+    speed_mult: float = 1.0
+    vision_mult: float = 1.0
+    carry_capacity: int = 1
+    damage_resistance: float = 0.0
+    comm_range_mult: float = 1.0
+
+# Přednastavené role
+ROLE_PRESETS = {
+    AgentRole.SCOUT: RoleComponent(
+        role=AgentRole.SCOUT,
+        speed_mult=1.3,
+        vision_mult=1.5,
+        carry_capacity=1
+    ),
+    AgentRole.CARRIER: RoleComponent(
+        role=AgentRole.CARRIER,
+        speed_mult=0.7,
+        vision_mult=0.8,
+        carry_capacity=4
+    ),
+    AgentRole.DEFENDER: RoleComponent(
+        role=AgentRole.DEFENDER,
+        speed_mult=0.9,
+        damage_resistance=0.5,
+        comm_range_mult=0.8
+    ),
+    AgentRole.LEADER: RoleComponent(
+        role=AgentRole.LEADER,
+        speed_mult=1.0,
+        comm_range_mult=2.0  # Mluví dál
+    ),
+}
+```
+
+KROK 2: Modifikuj existující systémy (MÍSTO vytváření nových)
+------------------------------------------------------------
+```python
+# entropy/systems/physics_system.py (ÚPRAVA)
+
+def compute_agent_speed(base_speed, agent_id, role_components):
+    """Aplikuj role modifikátor na rychlost."""
+    role = role_components.get(agent_id)
+    if role:
+        return base_speed * role.speed_mult
+    return base_speed
+```
+
+```python
+# entropy/systems/sensor_system.py (ÚPRAVA)
+
+def compute_lidar_range(base_range, agent_id, role_components):
+    """Aplikuj role modifikátor na viditelnost."""
+    role = role_components.get(agent_id)
+    if role:
+        return base_range * role.vision_mult
+    return base_range
+```
+
+KROK 3: Přidej konfiguraci
+--------------------------
+```yaml
+# configs/mission/team_roles.yaml (NOVÝ SOUBOR)
+
+mission:
+  name: "team_collection"
+  
+  teams:
+    - id: 0
+      name: "Alpha"
+      agents:
+        - role: scout
+          count: 2
+        - role: carrier
+          count: 2
+        - role: leader
+          count: 1
+          
+  objectives:
+    - type: "collect_resources"
+      target_count: 20
+      
+  role_rewards:
+    scout:
+      exploration_bonus: 0.1
+      discovery_bonus: 1.0
+    carrier:
+      delivery_bonus: 2.0
+    leader:
+      coordination_bonus: 0.5  # Bonus když tým uspěje
+```
+
+CO SE NEROZBIJE:
+  ✅ Základní pohyb - role jen MODIFIKUJE rychlost
+  ✅ Komunikace - role může být součástí zprávy (payload)
+  ✅ Rendering - můžeš barvit agenty podle role (volitelně)
+  ✅ Training - jeden PPO se učí všechny role (parameter sharing)
+
+================================================================================
+PŘÍKLAD 3: NOVÝ SENZOR (Kamera/Vision Cone)
+================================================================================
+
+ZADÁNÍ: Kromě Lidaru chci agentům dát "kameru" - vidí jen dopředu, ale dál.
+
+KROK 1: Přidej komponentu
+-------------------------
+```python
+# entropy/components/camera_sensor.py (NOVÝ SOUBOR)
+
+@dataclass
+class CameraSensorComponent:
+    """Směrová kamera s omezeným FOV."""
+    fov_degrees: float = 60.0      # Field of View
+    range: float = 500.0           # Dosah (delší než lidar)
+    resolution: int = 16           # Kolik "pixelů" v šířce
+    
+    # Výstup (plní CameraSensorSystem)
+    readings: jnp.ndarray = None   # [resolution] - vzdálenosti
+    detected_entities: list = None # ID entit v záběru
+```
+
+KROK 2: Přidej systém
+---------------------
+```python
+# entropy/systems/camera_sensor_system.py (NOVÝ SOUBOR)
+
+class CameraSensorSystem:
+    @staticmethod
+    @jax.jit
+    def update(state: WorldState) -> WorldState:
+        # Pro každého agenta s CameraSensorComponent:
+        # 1. Vypočítej cone od agent.angle ± fov/2
+        # 2. Raycast v tomto cone
+        # 3. Ulož readings a detected_entities
+        
+        camera_readings = compute_camera_readings(
+            state.agent_positions,
+            state.agent_angles,
+            state.wall_segments,
+            state.object_positions,
+            fov=60, range=500, resolution=16
+        )
+        
+        return state.replace(camera_readings=camera_readings)
+```
+
+KROK 3: Rozšiř observation space
+--------------------------------
+```python
+# entropy/training/observation.py (ÚPRAVA)
+
+def get_observation(state, agent_id):
+    obs = []
+    
+    # Lidar (existující)
+    obs.append(state.lidar_readings[agent_id])
+    
+    # Kamera (NOVÉ - pokud má agent CameraComponent)
+    if has_component(agent_id, CameraSensorComponent):
+        obs.append(state.camera_readings[agent_id])
+    
+    # Velocity, goal, etc...
+    obs.append(state.agent_velocities[agent_id] / 100.0)
+    obs.append((state.goal_positions[agent_id] - state.agent_positions[agent_id]) / 1000.0)
+    
+    return jnp.concatenate(obs)
+```
+
+CO SE NEROZBIJE:
+  ✅ Lidar - stále funguje paralelně
+  ✅ Physics - neví o senzorech
+  ✅ Communication - neví o senzorech
+  ✅ Rendering - můžeš volitelně vykreslit FOV cone
+
+================================================================================
+PŘÍKLAD 4: NOVÝ TYP MISE (Capture The Flag)
+================================================================================
+
+ZADÁNÍ: Dva týmy, každý má vlajku, cíl je přinést nepřátelskou vlajku domů.
+
+KROK 1: Přidej mise-specifické komponenty
+-----------------------------------------
+```python
+# entropy/components/ctf.py (NOVÝ SOUBOR)
+
+@dataclass
+class FlagComponent:
+    team_id: int
+    is_carried: bool = False
+    carrier_agent_id: int = -1
+    home_position: jnp.ndarray = None
+
+@dataclass
+class CTFAgentComponent:
+    team_id: int
+    has_flag: bool = False
+    flag_entity_id: int = -1  # Kterou vlajku nese
+```
+
+KROK 2: Přidej mise-specifický systém
+-------------------------------------
+```python
+# entropy/systems/ctf_system.py (NOVÝ SOUBOR)
+
+class CTFSystem:
+    @staticmethod
+    def update(state: WorldState) -> WorldState:
+        # 1. Kontrola pickup (agent dosáhl nepřátelské vlajky)
+        # 2. Kontrola capture (agent s vlajkou dosáhl své base)
+        # 3. Kontrola tag (nepřítel se dotkl nositele vlajky = drop)
+        # 4. Update scores
+        
+        return state
+
+class CTFRewardSystem:
+    @staticmethod
+    def compute_rewards(state: WorldState) -> jnp.ndarray:
+        rewards = jnp.zeros(state.num_agents)
+        
+        # Capture = velký bonus
+        rewards += capture_bonus(...)
+        
+        # Nošení vlajky = malý bonus za krok
+        rewards += carrying_bonus(...)
+        
+        # Obrana (blízko vlastní vlajky) = malý bonus
+        rewards += defense_bonus(...)
+        
+        return rewards
+```
+
+KROK 3: Konfigurace
+-------------------
+```yaml
+# configs/mission/capture_the_flag.yaml
+
+mission:
+  name: "capture_the_flag"
+  type: "ctf"
+  
+  teams:
+    - id: 0
+      name: "Red"
+      spawn_zone: [0, 0, 200, 600]
+      flag_position: [100, 300]
+      color: [255, 0, 0]
+    - id: 1
+      name: "Blue"
+      spawn_zone: [600, 0, 800, 600]
+      flag_position: [700, 300]
+      color: [0, 0, 255]
+      
+  rules:
+    capture_score: 10
+    max_captures: 3
+    respawn_time: 5.0
+    
+  rewards:
+    capture: 100.0
+    pickup: 10.0
+    return_flag: 20.0
+    tag_carrier: 15.0
+    proximity_defense: 0.01
+```
+
+CO SE NEROZBIJE:
+  ✅ Základní pohyb - stejný jako vždy
+  ✅ Komunikace - agenti mohou hlásit "MÁM VLAJKU" nebo "NEPŘÍTEL U BÁZE"
+  ✅ Rendering - základní rendering funguje, CTF přidá vlajky
+  ✅ Training - PPO trénuje na CTF rewardech
+
+================================================================================
+PŘÍKLAD 5: ZMĚNA RENDERERU (z Vispy na ModernGL)
+================================================================================
+
+ZADÁNÍ: Chci použít jiný rendering engine.
+
+KROK 1: Implementuj nový renderer se STEJNÝM INTERFACE
+------------------------------------------------------
+```python
+# entropy/render/moderngl_renderer.py (NOVÝ SOUBOR)
+
+class ModernGLRenderer:
+    """Alternativní renderer používající ModernGL."""
+    
+    def __init__(self, width, height):
+        self.ctx = moderngl.create_context()
+        # Setup shaders, buffers...
+        
+    def update(self, frame: RenderFrame):
+        """STEJNÝ INTERFACE jako VispyRenderer."""
+        self.update_agent_positions(frame.agent_positions)
+        self.update_goals(frame.goal_positions)
+        self.update_walls(frame.wall_segments)
+        
+    def render(self):
+        """Vykresli frame."""
+        # ModernGL specifický kód...
+```
+
+KROK 2: Změň konfiguraci
+------------------------
+```yaml
+# configs/render/moderngl.yaml
+
+render:
+  backend: "moderngl"  # místo "vispy"
+  width: 800
+  height: 600
+  # ...
+```
+
+```python
+# entropy/render/__init__.py (ÚPRAVA)
+
+def create_renderer(cfg):
+    if cfg.render.backend == "vispy":
+        from .vispy_renderer import VispyRenderer
+        return VispyRenderer(cfg.render.width, cfg.render.height)
+    elif cfg.render.backend == "moderngl":
+        from .moderngl_renderer import ModernGLRenderer
+        return ModernGLRenderer(cfg.render.width, cfg.render.height)
+```
+
+CO SE NEROZBIJE:
+  ✅ VŠECHNO ostatní - rendering je úplně oddělený od simulace
+  ✅ Physics, Brain, Training, Communication - vůbec neví že existuje renderer
+
+================================================================================
+ZLATÁ PRAVIDLA ROZŠIŘITELNOSTI
+================================================================================
+
+1. NOVÉ KOMPONENTY = Jen data, žádná logika
+   ```python
+   @dataclass
+   class MyComponent:
+       some_value: float  # ✅ SPRÁVNĚ
+       
+       def compute(self):  # ❌ ŠPATNĚ - logika patří do System
+           pass
+   ```
+
+2. NOVÉ SYSTÉMY = Čtou/píšou WorldState, nevolají jiné systémy
+   ```python
+   class MySystem:
+       def update(self, state):
+           # ✅ SPRÁVNĚ:
+           return state.replace(my_field=new_value)
+           
+           # ❌ ŠPATNĚ:
+           PhysicsSystem.do_something()  # Přímé volání jiného systému
+   ```
+
+3. KONFIGURACE = YAML, ne Python konstanty
+   ```yaml
+   # ✅ SPRÁVNĚ: configs/my_feature.yaml
+   my_feature:
+     enabled: true
+     strength: 0.5
+   ```
+   ```python
+   # ❌ ŠPATNĚ: Hardcoded v kódu
+   MY_FEATURE_STRENGTH = 0.5
+   ```
+
+4. INTERFACE = Definuj předem, implementace může být různá
+   ```python
+   class BaseRenderer(ABC):
+       @abstractmethod
+       def update(self, frame: RenderFrame): pass
+       
+       @abstractmethod  
+       def render(self): pass
+   ```
+
+================================================================================
+                            KONEC EXTENSIBILITY
+           Pokračuj čtením 11_HAND_OF_GOD.txt pro asistované učení.
+================================================================================

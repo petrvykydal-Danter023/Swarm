@@ -1,0 +1,287 @@
+================================================================================
+DYNAMIC HIERARCHY (Dynamičtí velitelé) - Implementation Plan
+================================================================================
+
+GOAL:
+Agenti se automaticky seskupují do čet (squads). Každá četa má lídra, který
+agreguje informace a komunikuje s ostatními lídry. Škálovatelné na stovky agentů.
+
+================================================================================
+1. CONFIGURATION CHANGES
+================================================================================
+
+File: entropy/config.py
+
+Add to CommConfig:
+    hierarchy_enabled: bool = False
+    squad_size: int = 5               # Agents per squad
+    leader_election_mode: str = "proximity"  # "proximity", "random", "learned"
+    leader_broadcast_only: bool = True  # Only leaders can broadcast globally
+
+================================================================================
+2. WORLD STATE EXTENSION
+================================================================================
+
+File: entropy/core/world.py
+
+Add squad management fields:
+
+    @dataclass
+    class WorldState:
+        # ... existing fields ...
+        
+        # Squad Assignment [N]
+        agent_squad_ids: jnp.ndarray      # [N] - Which squad each agent belongs to
+        agent_is_leader: jnp.ndarray      # [N] - Boolean, is this agent a leader?
+        
+        # Squad Centroids [num_squads, 2]
+        squad_centroids: jnp.ndarray      # [S, 2] - Average position of each squad
+
+================================================================================
+3. SQUAD FORMATION LOGIC
+================================================================================
+
+File: NEW - entropy/brain/hierarchy.py
+
+    def assign_squads_kmeans(positions, num_squads, rng):
+        """
+        Use K-Means clustering to assign agents to squads.
+        Called periodically (e.g., every 100 steps) to rebalance.
+        """
+        from jax.scipy.cluster.vq import kmeans2  # Or custom JAX kmeans
+        
+        centroids, labels = kmeans2(positions, num_squads)
+        return labels, centroids
+    
+    def assign_squads_proximity(positions, squad_size):
+        """
+        Simple proximity-based assignment:
+        - Sort agents by position (e.g., X then Y)
+        - Group consecutive agents into squads
+        """
+        N = positions.shape[0]
+        num_squads = N // squad_size
+        
+        # Sort by X coordinate
+        sort_idx = jnp.argsort(positions[:, 0])
+        
+        squad_ids = jnp.zeros(N, dtype=jnp.int32)
+        for s in range(num_squads):
+            start = s * squad_size
+            end = min((s + 1) * squad_size, N)
+            squad_ids = squad_ids.at[sort_idx[start:end]].set(s)
+        
+        return squad_ids
+    
+    def elect_leaders(state, config):
+        """
+        Elect one leader per squad.
+        Options:
+        - "proximity": Closest to squad centroid
+        - "random": Random agent in squad
+        - "learned": Based on agent's hidden state (future)
+        """
+        N = state.agent_positions.shape[0]
+        num_squads = N // config.squad_size
+        
+        is_leader = jnp.zeros(N, dtype=jnp.bool_)
+        
+        for s in range(num_squads):
+            squad_mask = state.agent_squad_ids == s
+            squad_positions = state.agent_positions[squad_mask]
+            
+            if config.leader_election_mode == "proximity":
+                centroid = state.squad_centroids[s]
+                dists = jnp.linalg.norm(squad_positions - centroid, axis=1)
+                leader_local_idx = jnp.argmin(dists)
+                
+                # Convert local to global index
+                global_indices = jnp.where(squad_mask)[0]
+                leader_idx = global_indices[leader_local_idx]
+                
+            elif config.leader_election_mode == "random":
+                global_indices = jnp.where(squad_mask)[0]
+                leader_idx = global_indices[0]  # Deterministic for JAX
+            
+            is_leader = is_leader.at[leader_idx].set(True)
+        
+        return is_leader
+
+================================================================================
+4. COMMUNICATION ROUTING CHANGES
+================================================================================
+
+File: entropy/core/comms_router.py
+
+Add hierarchy-aware routing:
+
+    def route_messages_hierarchical(state, actions, config, rng):
+        """
+        Routing rules with hierarchy:
+        
+        1. WITHIN SQUAD (Channel 0 = Direct):
+           - Message goes to squad members only
+           - Non-leaders can only talk within squad
+        
+        2. BROADCAST (Channel 1):
+           - If config.leader_broadcast_only:
+             - Only leaders can broadcast
+             - Non-leader broadcast is converted to squad-direct
+           - Leaders receive all broadcasts
+        
+        3. LEADER-TO-LEADER (Channel 2, new):
+           - Message goes to other squad leaders only
+           - For strategic coordination
+        """
+        
+        # Parse actions
+        channel = actions[:, 3]
+        is_broadcast = channel > 0.5
+        is_leader_msg = channel > 1.5
+        
+        # Filter: Non-leaders cannot broadcast if restricted
+        if config.leader_broadcast_only:
+            can_broadcast = state.agent_is_leader
+            is_broadcast = is_broadcast & can_broadcast
+        
+        # Squad filtering
+        same_squad = state.agent_squad_ids[:, None] == state.agent_squad_ids[None, :]
+        
+        # Direct messages: Only within squad
+        # Modify distance scoring to prefer same-squad
+        squad_bonus = jnp.where(same_squad, 0.0, 1000.0)  # Penalize cross-squad direct
+        
+        # Apply to routing score
+        final_score = base_distance_score + squad_bonus
+        
+        # ... rest of routing logic ...
+
+================================================================================
+5. OBSERVATION EXTENSION
+================================================================================
+
+File: entropy/training/env_wrapper.py
+
+Add squad info to observation:
+
+    def _get_obs(self, state, ...):
+        # ... existing obs ...
+        
+        if cfg.comm.hierarchy_enabled:
+            # Agent's squad ID (one-hot or embedding)
+            squad_onehot = jax.nn.one_hot(state.agent_squad_ids, num_squads)
+            
+            # Is this agent the leader?
+            is_leader_float = state.agent_is_leader.astype(jnp.float32)[:, None]
+            
+            # Squad centroid direction (relative)
+            squad_centroids = state.squad_centroids[state.agent_squad_ids]
+            rel_centroid = (squad_centroids - state.agent_positions) / 1000.0
+            
+            hierarchy_obs = jnp.concatenate([
+                squad_onehot, 
+                is_leader_float,
+                rel_centroid
+            ], axis=-1)
+            
+            return jnp.concatenate([obs, hierarchy_obs], axis=-1)
+
+================================================================================
+6. STEP LOGIC UPDATE
+================================================================================
+
+File: entropy/training/env_wrapper.py
+
+    def step(self, state, actions, rng):
+        # ... existing step logic ...
+        
+        if cfg.comm.hierarchy_enabled:
+            # Periodically re-elect leaders (e.g., every 50 steps)
+            if state.timestep % 50 == 0:
+                # Reassign squads based on current positions
+                squad_ids = assign_squads_proximity(
+                    next_state.agent_positions, 
+                    cfg.comm.squad_size
+                )
+                
+                # Update centroids
+                centroids = compute_squad_centroids(next_state.agent_positions, squad_ids)
+                
+                # Elect new leaders
+                next_state = next_state.replace(agent_squad_ids=squad_ids, squad_centroids=centroids)
+                is_leader = elect_leaders(next_state, cfg.comm)
+                next_state = next_state.replace(agent_is_leader=is_leader)
+
+================================================================================
+7. VISUALIZATION
+================================================================================
+
+File: entropy/render/cpu_renderer.py
+
+    def draw_hierarchy(self, frame, state, config):
+        # Draw squad boundaries (convex hull or just color coding)
+        squad_colors = [(255, 0, 0), (0, 255, 0), (0, 0, 255), ...]
+        
+        for i, pos in enumerate(state.agent_positions):
+            squad = state.agent_squad_ids[i]
+            is_leader = state.agent_is_leader[i]
+            
+            color = squad_colors[squad % len(squad_colors)]
+            
+            # Draw agent with squad color
+            cv2.circle(frame, self.to_pix(pos), 10, color, -1)
+            
+            # Leaders get a crown/star
+            if is_leader:
+                cv2.drawMarker(frame, self.to_pix(pos), (255, 255, 0), 
+                              cv2.MARKER_STAR, 20, 2)
+
+================================================================================
+8. VERIFICATION PLAN
+================================================================================
+
+Test 1: Squad Formation
+    - 20 agents, squad_size=5 -> 4 squads
+    - Verify each agent has squad_id in [0, 3]
+    - Verify exactly 4 leaders
+
+Test 2: Communication Isolation
+    - Agent in Squad 1 sends direct message
+    - Verify: Only Squad 1 members receive it
+    - Agent in Squad 1 (non-leader) tries to broadcast
+    - If leader_broadcast_only: Message is blocked/converted
+
+Test 3: Scalability
+    - 100 agents, squad_size=10 -> 10 squads
+    - Measure: Message count per step (should be O(sqrt(N)) not O(N^2))
+
+================================================================================
+9. ESTIMATED EFFORT
+================================================================================
+
+- World State extension:  30 min
+- Squad assignment:        1-2 hours
+- Leader election:         1 hour
+- Routing changes:         2 hours
+- Visualization:           1 hour
+- Testing:                 1-2 hours
+
+TOTAL: ~6-8 hours
+
+================================================================================
+10. DEPENDENCIES
+================================================================================
+
+- Requires: Spatial Communication (DONE)
+- Requires: Channel concept (DONE)
+- Optional: Learned leadership (future - requires RL for role assignment)
+
+================================================================================
+11. FUTURE EXTENSIONS
+================================================================================
+
+- Nested Hierarchy: Squad -> Platoon -> Company (3 levels)
+- Role Specialization: Scout, Defender, Carrier (different obs/actions)
+- Democratic Leadership: Agents vote on leader based on performance
+
+================================================================================

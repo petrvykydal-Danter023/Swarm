@@ -1,0 +1,511 @@
+================================================================================
+                    12_TESTING_AND_VALIDATION.txt
+                    Testovací Skripty a Validace
+================================================================================
+
+================================================================================
+1. TESTOVACÍ FILOSOFIE
+================================================================================
+
+V2 PROBLÉM:
+  - Testy byly ad-hoc (test_phase2_env.py, test_wrapper_loading.py...)
+  - Žádná systematická struktura
+  - Testy nebyly automatizované
+
+V3 ŘEŠENÍ:
+  - Strukturovaná testovací pyramida
+  - Rychlé smoke testy pro každý modul
+  - CI/CD integrace (GitHub Actions)
+  - Benchmark testy pro performance regression
+
+================================================================================
+2. STRUKTURA TESTŮ
+================================================================================
+
+```
+tests/
+├── unit/                        # Rychlé, izolované testy
+│   ├── test_physics.py
+│   ├── test_ecs.py
+│   ├── test_communication.py
+│   └── test_reward.py
+│
+├── integration/                 # Testy spolupráce modulů
+│   ├── test_env_step.py
+│   ├── test_training_loop.py
+│   └── test_render_integration.py
+│
+├── smoke/                       # Rychlé "funguje vůbec?" testy
+│   ├── smoke_physics.py         # 5 sekund
+│   ├── smoke_brain.py           # 5 sekund
+│   ├── smoke_render.py          # 5 sekund
+│   └── smoke_full.py            # 30 sekund (celý pipeline)
+│
+├── benchmark/                   # Performance testy
+│   ├── bench_physics_scaling.py # 10/100/1000/10000 agentů
+│   ├── bench_communication.py
+│   └── bench_render_fps.py
+│
+└── validation/                  # End-to-end validace
+    ├── validate_navigation.py
+    ├── validate_communication_grounding.py
+    └── validate_formation.py
+```
+
+================================================================================
+3. UNIT TESTY
+================================================================================
+
+3.1 PHYSICS TESTS
+-----------------
+```python
+# tests/unit/test_physics.py
+
+import pytest
+import jax.numpy as jnp
+from entropy.core.physics import physics_step, compute_lidars
+from entropy.core.world import WorldState, create_empty_world
+
+class TestPhysicsStep:
+    def test_agent_moves_forward(self):
+        """Agent s akci 'vpřed' se pohne ve směru svého úhlu."""
+        state = create_empty_world(num_agents=1)
+        state = state.replace(
+            agent_positions=jnp.array([[100.0, 100.0]]),
+            agent_angles=jnp.array([0.0])  # Směr: vpravo
+        )
+        
+        actions = jnp.array([[1.0, 1.0]])  # Oba motory vpřed
+        new_state = physics_step(state, actions, dt=0.1)
+        
+        # Agent se pohnul vpravo
+        assert new_state.agent_positions[0, 0] > 100.0
+        
+    def test_agent_rotates(self):
+        """Rozdílné motory způsobí rotaci."""
+        state = create_empty_world(num_agents=1)
+        actions = jnp.array([[1.0, -1.0]])  # Levý vpřed, pravý vzad = rotace
+        new_state = physics_step(state, actions, dt=0.1)
+        
+        assert new_state.agent_angles[0] != 0.0
+        
+    def test_wall_collision(self):
+        """Agent neproletí zdí."""
+        state = create_empty_world(num_agents=1)
+        state = state.replace(
+            agent_positions=jnp.array([[10.0, 10.0]]),  # Blízko okraje
+            wall_segments=jnp.array([[0.0, 0.0, 0.0, 100.0]])  # Levá zeď
+        )
+        
+        actions = jnp.array([[-1.0, -1.0]])  # Jeď doleva (do zdi)
+        new_state = physics_step(state, actions, dt=0.1)
+        
+        # Agent se nepohnul za zeď
+        assert new_state.agent_positions[0, 0] >= 10.0  # Radius
+
+
+class TestLidar:
+    def test_lidar_detects_wall(self):
+        """Lidar detekuje blízkou zeď."""
+        state = create_empty_world(num_agents=1)
+        state = state.replace(
+            agent_positions=jnp.array([[50.0, 50.0]]),
+            wall_segments=jnp.array([[100.0, 0.0, 100.0, 100.0]])  # Zeď vpravo
+        )
+        
+        readings = compute_lidars(state, num_rays=32, max_range=300.0)
+        
+        # Paprsek směřující vpravo (index ~8 pro 32 paprsků) vidí zeď
+        # readings[0, 8] by měla být menší než 1.0 (ne max range)
+        assert readings[0, 8] < 1.0
+```
+
+3.2 ECS TESTS
+-------------
+```python
+# tests/unit/test_ecs.py
+
+from entropy.core.ecs import EntityRegistry, create_agent, create_goal
+from entropy.components import TransformComponent, PhysicsComponent
+
+class TestECSRegistry:
+    def test_create_entity(self):
+        registry = EntityRegistry()
+        eid = registry.create_entity()
+        assert eid == 0
+        assert eid in registry.active_entities
+        
+    def test_add_component(self):
+        registry = EntityRegistry()
+        eid = registry.create_entity()
+        
+        registry.add_component(eid, TransformComponent(position=[0, 0], angle=0))
+        
+        comp = registry.get_component(eid, TransformComponent)
+        assert comp is not None
+        assert comp.position == [0, 0]
+        
+    def test_entity_factory(self):
+        registry = EntityRegistry()
+        agent_id = create_agent(registry, position=(100, 100))
+        
+        # Agent má všechny potřebné komponenty
+        assert registry.get_component(agent_id, TransformComponent) is not None
+        assert registry.get_component(agent_id, PhysicsComponent) is not None
+```
+
+3.3 COMMUNICATION TESTS
+-----------------------
+```python
+# tests/unit/test_communication.py
+
+from entropy.brain.communication import CommunicationEncoder, encode_message, decode_messages
+
+class TestCommunication:
+    def test_encode_decode_roundtrip(self):
+        """Zakódovaná zpráva se správně dekóduje."""
+        token = 7  # FOUND_TARGET
+        payload = jnp.array([0.5, 0.3, 0.8, 0.0])
+        
+        message = encode_message(token, payload)
+        decoded_token, decoded_payload = decode_message(message)
+        
+        assert decoded_token == token
+        assert jnp.allclose(decoded_payload, payload, atol=0.01)
+        
+    def test_message_shape(self):
+        """Zpráva má správný tvar."""
+        # Canonical obs_dim = 32 + 2 + 2 + 64 = 100 (see 00_OVERVIEW.txt)
+        encoder = CommunicationEncoder(obs_dim=100, vocab_size=32, payload_dim=4)
+        obs = jnp.zeros(36)
+        
+        message = encoder(obs)
+        
+        assert message.shape == (36,)  # 32 tokens + 4 payload
+```
+
+================================================================================
+4. SMOKE TESTY (Rychlá validace)
+================================================================================
+
+```python
+# tests/smoke/smoke_physics.py
+"""
+Rychlý test fyziky. Spustí se za <5 sekund.
+Použití: python -m pytest tests/smoke/smoke_physics.py -v
+"""
+
+import jax
+from entropy.core.world import create_random_world
+from entropy.core.physics import physics_step
+
+def test_smoke_physics():
+    """Fyzika se vůbec spustí a nepadne."""
+    print("🔥 Smoke Test: Physics")
+    
+    # 1. Vytvoř svět
+    rng = jax.random.PRNGKey(42)
+    state = create_random_world(rng, num_agents=10)
+    print(f"  ✅ World created: {state.num_agents} agents")
+    
+    # 2. Proveď 100 kroků
+    for i in range(100):
+        actions = jax.random.uniform(rng, shape=(10, 2), minval=-1, maxval=1)
+        state = physics_step(state, actions)
+    print(f"  ✅ 100 steps completed")
+    
+    # 3. Zkontroluj že nic není NaN
+    assert not jnp.any(jnp.isnan(state.agent_positions)), "NaN in positions!"
+    assert not jnp.any(jnp.isnan(state.agent_velocities)), "NaN in velocities!"
+    print(f"  ✅ No NaN values")
+    
+    print("🎉 Smoke Test PASSED!")
+```
+
+```python
+# tests/smoke/smoke_brain.py
+
+def test_smoke_brain():
+    """Brain inference funguje."""
+    print("🔥 Smoke Test: Brain")
+    
+    # 1. Vytvoř brain
+    from entropy.brain import BrainManager, PPOPolicy
+    manager = BrainManager()
+    policy = PPOPolicy(obs_dim=100, action_dim=2)
+    print(f"  ✅ Policy created")
+    
+    # 2. Inference
+    obs = jnp.zeros((10, 100))  # 10 agentů
+    actions = policy.act(obs)
+    print(f"  ✅ Inference: {actions.shape}")
+    
+    assert actions.shape == (10, 2)
+    print("🎉 Smoke Test PASSED!")
+```
+
+```python
+# tests/smoke/smoke_full.py
+
+def test_smoke_full_pipeline():
+    """Celý pipeline: env -> brain -> step -> reward."""
+    print("🔥 Smoke Test: Full Pipeline")
+    
+    from entropy import create_env, create_policy
+    
+    # 1. Env
+    env = create_env(num_agents=5)
+    state = env.reset()
+    print(f"  ✅ Env reset")
+    
+    # 2. Policy
+    policy = create_policy(env.observation_space, env.action_space)
+    print(f"  ✅ Policy created")
+    
+    # 3. Rollout
+    total_reward = 0
+    for _ in range(100):
+        obs = env.get_observations(state)
+        actions = policy.act(obs)
+        state, rewards, dones, infos = env.step(state, actions)
+        total_reward += rewards.sum()
+    print(f"  ✅ 100 steps, total reward: {total_reward:.2f}")
+    
+    print("🎉 Smoke Test PASSED!")
+```
+
+================================================================================
+5. BENCHMARK TESTY
+================================================================================
+
+```python
+# tests/benchmark/bench_physics_scaling.py
+"""
+Měří FPS pro různý počet agentů.
+Výstup: Tabulka a graf pro performance regression.
+"""
+
+import time
+import jax
+from entropy.core.world import create_random_world
+from entropy.core.physics import physics_step
+
+def benchmark_physics(num_agents, num_steps=1000):
+    rng = jax.random.PRNGKey(42)
+    state = create_random_world(rng, num_agents=num_agents)
+    actions = jax.random.uniform(rng, shape=(num_agents, 2), minval=-1, maxval=1)
+    
+    # Warmup (JIT compile)
+    for _ in range(10):
+        state = physics_step(state, actions)
+    
+    # Benchmark
+    start = time.perf_counter()
+    for _ in range(num_steps):
+        state = physics_step(state, actions)
+    elapsed = time.perf_counter() - start
+    
+    fps = num_steps / elapsed
+    return fps
+
+def test_benchmark_scaling():
+    results = []
+    for n in [10, 100, 1000, 10000]:
+        fps = benchmark_physics(n)
+        results.append((n, fps))
+        print(f"  {n:>6} agents: {fps:>10.0f} FPS")
+    
+    # Validace: musíme splnit minimální požadavky
+    assert results[0][1] > 100000, "10 agents should be >100k FPS"
+    assert results[1][1] > 10000, "100 agents should be >10k FPS"
+    assert results[2][1] > 1000, "1000 agents should be >1k FPS"
+```
+
+================================================================================
+6. VALIDAČNÍ TESTY (End-to-End)
+================================================================================
+
+```python
+# tests/validation/validate_navigation.py
+"""
+Ověří, že natrénovaný agent umí navigovat k cíli.
+Používá se po tréninku pro sanity check.
+"""
+
+def test_navigation_after_training():
+    """Natrénovaný agent dosáhne cíle v 90% případů."""
+    
+    from entropy import create_env, load_policy
+    
+    env = create_env(num_agents=1, difficulty="easy")
+    policy = load_policy("models/navigation_latest.pt")
+    
+    successes = 0
+    num_episodes = 100
+    
+    for ep in range(num_episodes):
+        state = env.reset()
+        for step in range(500):
+            obs = env.get_observations(state)
+            actions = policy.act(obs, deterministic=True)
+            state, rewards, dones, _ = env.step(state, actions)
+            if dones[0]:
+                if state.goal_reached[0]:
+                    successes += 1
+                break
+    
+    success_rate = successes / num_episodes
+    print(f"Success rate: {success_rate:.1%}")
+    
+    assert success_rate > 0.9, f"Expected >90% success, got {success_rate:.1%}"
+```
+
+```python
+# tests/validation/validate_communication_grounding.py
+"""
+Ověří, že komunikace je grounded (slova odpovídají situacím).
+"""
+
+def test_communication_grounding():
+    """Token FOUND_TARGET se vysílá jen když agent vidí cíl."""
+    
+    from entropy import create_env, load_policy
+    
+    env = create_env(num_agents=5)
+    policy = load_policy("models/communication_latest.pt")
+    
+    correct_predictions = 0
+    total_non_silence = 0
+    
+    state = env.reset()
+    for _ in range(1000):
+        obs = env.get_observations(state)
+        actions = policy.act(obs)
+        
+        for i in range(5):
+            token = jnp.argmax(state.agent_messages[i][:32])
+            if token != 0:  # Ne-silence
+                total_non_silence += 1
+                
+                if token == 7:  # FOUND_TARGET
+                    # Agent by měl vidět svůj cíl
+                    can_see = can_see_goal(state, i)
+                    if can_see:
+                        correct_predictions += 1
+                        
+        state, _, _, _ = env.step(state, actions)
+    
+    grounding_accuracy = correct_predictions / max(total_non_silence, 1)
+    print(f"Grounding accuracy: {grounding_accuracy:.1%}")
+    
+    assert grounding_accuracy > 0.8, "Communication should be >80% grounded"
+```
+
+================================================================================
+7. CLI PRO TESTY
+================================================================================
+
+```bash
+# Spustit všechny unit testy
+pytest tests/unit/ -v
+
+# Spustit smoke testy (rychlá validace)
+pytest tests/smoke/ -v --timeout=30
+
+# Spustit benchmarky
+pytest tests/benchmark/ -v --benchmark
+
+# Spustit validaci po tréninku
+pytest tests/validation/ -v
+
+# Spustit vše
+pytest tests/ -v
+
+# Coverage report
+pytest tests/ --cov=entropy --cov-report=html
+```
+
+================================================================================
+8. CI/CD INTEGRACE (GitHub Actions)
+================================================================================
+
+```yaml
+# .github/workflows/test.yml
+
+name: Tests
+
+on: [push, pull_request]
+
+jobs:
+  smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+      - uses: actions/setup-python@v4
+        with:
+          python-version: '3.11'
+      - run: pip install -r requirements.txt
+      - run: pytest tests/smoke/ -v --timeout=60
+
+  unit:
+    runs-on: ubuntu-latest
+    needs: smoke  # Smoke musí projít první
+    steps:
+      - uses: actions/checkout@v3
+      - uses: actions/setup-python@v4
+      - run: pip install -r requirements.txt
+      - run: pytest tests/unit/ -v --cov=entropy
+
+  benchmark:
+    runs-on: ubuntu-latest
+    needs: unit
+    steps:
+      - uses: actions/checkout@v3
+      - uses: actions/setup-python@v4
+      - run: pip install -r requirements.txt
+      - run: pytest tests/benchmark/ -v
+      - name: Upload benchmark results
+        uses: actions/upload-artifact@v3
+        with:
+          name: benchmark-results
+          path: benchmark_results.json
+```
+
+================================================================================
+9. TESTOVACÍ FIXTURES
+================================================================================
+
+```python
+# tests/conftest.py (pytest fixtures)
+
+import pytest
+import jax
+
+@pytest.fixture
+def rng():
+    """Reprodukovatelný RNG pro testy."""
+    return jax.random.PRNGKey(42)
+
+@pytest.fixture
+def small_world(rng):
+    """Malý svět pro rychlé testy."""
+    from entropy.core.world import create_random_world
+    return create_random_world(rng, num_agents=5, arena_size=(200, 200))
+
+@pytest.fixture
+def trained_policy():
+    """Předtrénovaná policy pro validační testy."""
+    from entropy.brain import load_policy
+    return load_policy("test_fixtures/dummy_policy.pt")
+
+@pytest.fixture
+def mock_brain_manager(tmp_path):
+    """BrainManager s dočasným úložištěm."""
+    from entropy.brain import BrainManager
+    return BrainManager(storage_dir=str(tmp_path))
+```
+
+================================================================================
+                            KONEC TESTING
+           Pokračuj čtením 13_SWARM_AI_FACTORY.txt pro automatizovaný trénink.
+================================================================================

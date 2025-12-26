@@ -1,0 +1,123 @@
+Odpověď je jednoznačná: VŠECHNO NENÍ AI. Profi firmy jako Boston Dynamics nebo Tesla používají Hybridní Architekturu. 🧠 + ⚙️
+Tady je rozbor, jak to dělají "Velcí Kluci" (a co si z toho vzít):
+1. LOW-LEVEL CONTROL: Klasický Algoritmus (Fyzika) ⚙️
+Když se robot Atlas potřebuje udržet na jedné noze, nepoužívá k tomu AI. Používá MPC (Model Predictive Control) a WBC (Whole-Body Control).​
+Proč ne AI: AI je "měkká". Může udělat chybu. Pokud AI udělá chybu v rovnováze, robot spadne a rozbije se za $1M.
+Proč Algoritmus: Rovnice inverzní kinematiky (IK) a fyziky jsou 100% přesné. Algoritmus spočítá přesně, jakou sílu poslat do kolene, aby se robot nepřevrátil.
+Aplikace pro tebe: Tvůj engine by měl mít "Safety Layer". I když RL síť řekne "Naraz do zdi plnou rychlostí", nízkoúrovňový controller (algoritmus) by to měl "změkčit" nebo zastavit.
+2. MID-LEVEL PLANNING: Hybrid (AI + Algoritmus) 🤝
+Tady se to začíná míchat.
+Boston Dynamics (Atlas): Používá knihovnu předpočítaných pohybů (trajectory library) pro skoky a salta. AI (RL) se používá k tomu, aby vybrala který pohyb použít a jak ho doladit (adaptace na terén).​
+Tesla (Optimus): Používá "End-to-End Neural Nets" (podobně jako FSD v autech) pro vizuální navigaci, ale stále má tvrdé limity na kloubech.​
+Aplikace pro tebe: Tvůj "Spatial Addressing" je přesně tento hybrid. AI vybere komu poslat zprávu (Strategy), ale algoritmus (JAX distance check) zajistí doručení (Execution).
+3. HIGH-LEVEL STRATEGY: Čistá AI (RL/LLM) 🧠
+Rozhodování typu "Mám jít prvně pro krabici A nebo B?" nebo "Mám pomoct parťákovi?" dělá AI.
+Důvod: Algoritmy špatně zvládají neurčitost a komplexní strategii. AI (Transformer/RL) exceluje v intuici a generalizaci.
+Figure AI: Používá OpenAI modely (LLM) pro pochopení příkazu ("Ukliď stůl") a převedení na sekvenci akcí.​
+
+MŮJ VERDIKT PRO TVŮJ ENGINE:
+Nesnaž se dělat "Pure AI" řešení, kde neuronová síť ovládá napětí v každém motorku. To je neefektivní a nestabilní.
+Postav "Sandwich Architekturu":
+Vrchní vrstva (AI / Brain):
+Rozhoduje o CÍLECH ("Jdi na ", "Pošli zprávu ID 5").
+Používá Attention, LSTM, GNN.
+Trénováno pomocí RL (PPO).
+Střední vrstva (Translator / Interface):
+Překládá rozhodnutí AI na proveditelné příkazy.
+Např. Spatial Addressing logic (najdi nejbližšího souseda).
+Spodní vrstva (Algoritmus / Reflex):
+Provádí pohyb.
+Řeší kolize ("Nechoď skrz zeď").
+Řeší fyziku (tření, setrvačnost).
+Napsáno tvrdě v JAXu (deterministické).
+Tohle je profi přístup. AI je Generál, Algoritmus je Voják. Generál neřeší, jak voják šněruje boty (Low-Level), řeší bitvu (High-Level). 🫡
+
+1. PRAVIDLO "SEBEVRAŽDA ZAKÁZÁNA" (The Reflex) 🛡️
+Většina AI na začátku tréninku stráví 1000 epizod tím, že naráží do zdi a umírá. Je to ztráta času.
+Tvoje Taktika: Zapni tvrdý reflexní štít.
+Jak to využít: Tvůj swarm se nemusí učit "jak přežít". To má vrozené (díky algoritmu). Od první vteřiny se může soustředit na to "jak vyhrát".
+Výsledek: Agenti se pohybují plynule a bezpečně hned od začátku (jako ryby ve vodě), i když jsou strategicky hloupí. Trénink strategie (kooperace) se zrychlí 10x.
+2. HIERARCHIE ROZHODOVÁNÍ (Brain vs. Reflex) 🧠
+Musíš jasně určit, kdo má kdy slovo.
+Klidový stav: AI (Brain) má plnou kontrolu. Plánuje, formuje se, hledá cestu.
+Krizový stav (Kolize/Útok): Reflex přebírá řízení. AI řekne "Jeď vpřed", Reflex řekne "Ne, uhni vlevo, letí na tebe šutr".
+Využití pro swarm: Tvoji agenti budou vypadat extrémně inteligentně. Budou plnit složité formace (AI), ale když do nich někdo strčí, okamžitě a dokonale uhnou (Reflex), a pak se vrátí do formace (AI). To vypadá jako "živý organismus".
+3. "INTENT" MÍSTO "MOTORU" (High-Level Commands) 🗣️
+Neuč AI ovládat napětí v motorkách (-1.0 až 1.0). To je moc složité.
+Tvoje Taktika: Nauč AI vydávat "Rozkazy".
+Příkazy:
+GoTo(Target)
+Follow(Agent_ID)
+KeepDistance(5m)
+Jak to využít: Spodní vrstva (Algoritmus) zajistí, že se to stane. AI se stává "Velitelem", který jen ukazuje prstem.
+Výsledek: Swarm dokáže řešit extrémně složité úkoly (např. obklíčit nepřítele), protože AI nemusí řešit, jak se točí kolečka, ale řeší geometrii pasti.
+4. KAMIKAZE MÓD (Vypnutí Reflexu) 💣
+Někdy je "bezpečnost" na škodu. Třeba když musíš prorazit blokádu.
+Tvoje Taktika: Dej AI možnost vypnout Reflex.
+Jak to využít: Přidej do akcí výstup Override_Safety (0-1). Pokud AI usoudí, že musí narazit do jiného agenta (aby ho odtlačila) nebo projet ohněm (pro záchranu cíle), může dočasně potlačit reflexy.
+Výsledek: Agenti se chovají racionálně (bojí se o život), ale jsou schopni hrdinství.
+SHRNUTÍ: JAK TO VYUŽÍT PRO "WOW EFEKT"
+Představ si to ve vizualizaci:
+Formace: 50 agentů letí v dokonalém kruhu (AI Brain).
+Chaos: Hodíš mezi ně překážku.
+Reakce: Agenti v dráze plynule "obtečou" překážku (Reflex), aniž by narazili do sousedů, zatímco zbytek kruhu drží tvar.
+Návrat: Jakmile překážka zmizí, agenti se plynule vrátí na svá místa v kruhu (AI Brain).
+Tohle chování ("Liquid Swarm") získáš jen kombinací AI a Reflexu. Čistá AI by se to učila měsíce a stejně by do sebe naráželi. Hybrid to umí hned.
+
+1. "LIQUID FORMATION" (Tekutá Formace) 💧
+Cíl: Swarm se hýbe jako jeden organismus, který "obtéká" překážky.
+AI (Brain): Řeší pouze globální tvar. "Všichni se držte v kruhu o poloměru 10m kolem Velitele."
+Reflex (Layer): Repulsion Force. "Pokud je kolega blíž než 0.5m, trochu se odsuň." + "Pokud je zeď blíž než 1m, uhni."
+Výsledek: Když swarm narazí na sloup, AI stále tlačí "drž kruh", ale Reflexy donutí agenty sloup obtéct. Jakmile je sloup pryč, AI je automaticky stáhne zpět do dokonalého kruhu. Vypadá to organicky a AI se nemusí učit "jak obtékat sloup".
+2. "PANIC BUTTON" (Ústupový Manévr) 🚨
+Cíl: Okamžitá reakce na přepadení bez přemýšlení.
+Reflex (Layer): Detekce poškození/nárazu. Pokud Health klesne rychle, Reflex převezme řízení, otočí agenta o 180° a zapne "Boost" na 2 sekundy.
+AI (Brain): Mezitím (v těch 2 sekundách) má čas vymyslet novou strategii ("Změnit formaci na Obrannou").
+Výsledek: Agenti neumírají, zatímco AI přemýšlí. Reflex koupí AI čas na reakci.
+3. "PRECISE DOCKING" (Přesné Parkování/Nabíjení) 🔋
+Cíl: Agent musí zajet do malé nabíječky (přesnost na centimetry). RL se to učí strašně dlouho (motá se kolem).
+AI (Brain): "Jeď do oblasti nabíječek." (Hrubá navigace).
+Reflex (Layer): Jakmile je agent < 2m od nabíječky, zapne se "Magnetic Field". Reflex převezme řízení a navede agenta přesně na konektor pomocí PID regulátoru (matematicky přesné).
+Výsledek: AI stačí trefit "místnost". Zbytek dělá matematika. Vypadá to jako magie, agenti se "přicucnou" na nabíječky.
+4. "FRIENDLY FIRE PROTECTION" (Nestřílej do vlastních) 🔫
+Cíl: Pokud máš bojový swarm, nechceš, aby se postříleli navzájem.
+AI (Brain): "Vidím nepřítele, střílím!" (Agresivní strategie).
+Reflex (Layer): Raycast check. "Je v dráze střely spřátelené ID? -> ZABLOKUJ STŘELBU."
+Výsledek: AI se může naučit být hyper-agresivní (což je žádoucí), protože Safety Layer zajistí, že nikdy nezraní parťáka. Nemusíš AI učit složitou etiku střelby, prostě jí "sebereš spoušť", když míří špatně.
+5. "SOFT GRIPPER" (Přenášení předmětů) 📦
+Cíl: Agenti musí nést společně křehkou krabici.
+AI (Brain): "Jeď na Sever." (Navigace).
+Reflex (Layer): Force Feedback. "Pokud cítím, že mi krabice vyklouzává (ztráta tlaku), zpomal a přitlač k sobě."
+Výsledek: Agenti se automaticky synchronizují. Když jeden zpomalí (třeba kvůli terénu), druhý to "ucítí" přes krabici (Reflex) a taky zpomalí, aniž by si museli posílat zprávy. Je to fyzikální komunikace.
+
+1. KOMUNIKAČNÍ HYGIENA ("Radio Silence Protocol") 🔇
+Problém: AI zjistí, že mluvení je fajn, a začne spamovat kanál ("Jsem tu! Jsem tu! Jsem tu!"), čímž zahltí síť (DDoS útok sama na sebe).
+Safety Layer: Token Bucket Limiter.
+Každý agent má "kredit" na zprávy (např. 5 zpráv za 10 sekund).
+Jakmile vyčerpá kredit, Safety Layer zahodí jakoukoliv další zprávu, kterou AI zkusí poslat.
+Efekt: AI se musí naučit mluvit efektivně ("Jsem tu" pošle jen jednou), protože jinak jí dojde kredit v kritické chvíli. Zabraňuje to komunikačnímu kolapsu.
+2. ENERGETICKÁ POJISTKA ("Limp Mode") 🪫
+Problém: AI se honí za cílem tak agresivně, že vybije baterii 10 metrů před nabíječkou.
+Safety Layer: Battery Governor.
+Pokud Battery < 20%: Safety Layer natvrdo omezí maximální rychlost motorů na 50%.
+Pokud Battery < 5%: Safety Layer převezme kontrolu a vynutí GoTo(Charger), ignoruje všechny ostatní příkazy AI (pokud nejde o sebezáchovu).
+Efekt: Agent se stane "unaveným". AI to vidí (akce mají menší efekt) a naučí se, že s vybitou baterií se nevyplatí sprintovat.
+3. OCHRANA PŘED ZACYKLENÍM ("Watchdog Timer") 🔄
+Problém: AI se zasekne v rohu nebo v logické smyčce (chodí doleva-doprava-doleva-doprava).
+Safety Layer: Stalemate Detector.
+Ukládá pozici agenta každou sekundu.
+Pokud se agent za posledních 10 sekund nepohnul o více než 1 metr (ačkoli má příkaz se hýbat):
+ZÁSAH: Spustí "Random Walk" na 2 sekundy (náhodný směr), aby agenta "vykopla" z lokálního minima.
+Efekt: Swarm se nikdy trvale nezasekne. Vždycky se z toho nějak "vycuká".
+4. GEOLOKACE / HRANICE ("Geo-Fencing") 🚧
+Problém: AI se rozhodne, že nejlepší cesta k cíli vede přes zakázanou zónu (např. dálnice, hluboká voda, mimo mapu).
+Safety Layer: Virtual Fence.
+Pokud se agent přiblíží k hranici zóny na < 2 metry, Safety Layer aplikuje virtuální sílu směrem dovnitř.
+Je to jako neviditelná pružná stěna. AI může chtít ven, ale fyzika ji nepustí.
+Efekt: V reálu to znamená, že dron prostě neodletí z povoleného vzdušného prostoru, i kdyby se zbláznil software.
+5. VALIDACE ROZKAZŮ ("Authority Check") 👮
+Problém: Jeden agent se zblázní (nebo je hacknutý) a začne vysílat falešný rozkaz "Všichni skočte z útesu!".
+Safety Layer: Consensus Filter.
+Pokud přijde rozkaz "Zničte cíl", Safety Layer zkontroluje: "Vidím ten cíl taky?" nebo "Potvrdil to i někdo jiný?".
+Pokud ne, rozkaz je označen jako "Unverified" a AI ho dostane s příznakem Low_Confidence.
+Efekt: Swarm je odolný proti "Single Point of Failure" (zrádce/chyba). Jeden blázen nestrhne dav.

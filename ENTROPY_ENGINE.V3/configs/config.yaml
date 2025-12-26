@@ -1,0 +1,29 @@
+# @package _global_
+
+defaults:
+  - env: default
+  - agent: ppo
+  - mission: goal_finding
+  - render: disabled
+  - _self_
+
+# Global settings
+seed: 42
+experiment_name: "entropy_v3_test"
+output_dir: "outputs/${experiment_name}/${now:%Y-%m-%d_%H-%M-%S}"
+
+# Training loop settings
+training:
+  total_timesteps: 1_000_000
+  log_interval: 100
+  save_interval: 10_000
+  eval_interval: 5000
+  num_iterations: 500  # Used in ppo.py currently instead of total_timesteps directly in some loops
+
+# Logging
+wandb:
+  enabled: true
+  project: "entropy-v3"
+  entity: null
+  group: null
+  tags: []

@@ -1,0 +1,295 @@
+================================================================================
+                    03_COMMUNICATION.txt
+                    Hybridní Komunikační Systém
+================================================================================
+
+================================================================================
+1. CO FUNGUJE V V2 (Přenést)
+================================================================================
+
+V2 implementoval HYBRIDNÍ JAZYK:
+  - DISKRÉTNÍ TOKEN (1 z 32 slov) = "Co říkám" (CARRYING, FOUND_TARGET, ...)
+  - KONTINUÁLNÍ PAYLOAD (4 floaty) = "Detaily" (souřadnice, urgence, ...)
+
+DIAL PRETRAINING:
+  - Fáze 1: "Učitel" vnucuje správná slova (Hard Injection)
+  - Fáze 2: Učitel postupně mizí (Soft Injection + Curriculum)
+  - Výsledek: Agenti se naučí GROUNDED komunikaci (slovo ≈ situace)
+
+================================================================================
+2. V3 VYLEPŠENÍ
+================================================================================
+
+2.1 TRANSFORMER DECODER PRO KONTEXT
+------------------------------------
+
+V2:
+  - Decoder = jednoduchý MLP (messages -> context)
+  - Nelze zachytit "kdo co říká komu"
+
+V3:
+  - Decoder = Transformer (Self-Attention)
+  - Vstup: [msg_1, msg_2, ..., msg_N] + poziční encoding
+  - Attention naučí: "Zpráva od blízkého agenta je důležitější"
+
+```python
+import jax
+import jax.numpy as jnp
+from flax import linen as nn
+
+class TransformerContextDecoder(nn.Module):
+    """
+    Zpracovává zprávy od všech ostatních agentů.
+    Výstup: Kontextový vektor pro rozhodování.
+    """
+    msg_dim: int = 36
+    context_dim: int = 64
+    num_heads: int = 4
+    num_layers: int = 2
+    
+    @nn.compact
+    def __call__(self, messages: jnp.ndarray, positions: jnp.ndarray = None):
+        """
+        Args:
+            messages: [batch, num_agents, msg_dim] - zprávy od ostatních
+            positions: [batch, num_agents, 2] - relativní pozice (optional positional encoding)
+            
+        Returns:
+            context: [batch, context_dim]
+        """
+        # Embed messages
+        x = nn.Dense(self.context_dim, name='msg_embed')(messages)  # [B, N, context_dim]
+        
+        # Optional: Přidej poziční info
+        if positions is not None:
+            pos_embed = self._position_encoding(positions)
+            x = x + pos_embed
+        
+        # Multi-head self-attention across messages
+        for i in range(self.num_layers):
+            # Self-attention
+            attn_out = nn.MultiHeadDotProductAttention(
+                num_heads=self.num_heads,
+                qkv_features=self.context_dim,
+                name=f'attention_{i}'
+            )(x)
+            
+            # Residual connection + LayerNorm
+            x = nn.LayerNorm(name=f'ln1_{i}')(x + attn_out)
+            
+            # Feed-forward
+            ff = nn.Dense(128, name=f'ff1_{i}')(x)
+            ff = nn.relu(ff)
+            ff = nn.Dense(self.context_dim, name=f'ff2_{i}')(ff)
+            
+            # Residual connection + LayerNorm
+            x = nn.LayerNorm(name=f'ln2_{i}')(x + ff)
+        
+        # Pool to single vector (mean pooling)
+        context = jnp.mean(x, axis=1)  # [B, context_dim]
+        
+        return context
+    
+    def _position_encoding(self, positions):
+        """Simple positional encoding from relative positions."""
+        return nn.Dense(self.context_dim, name='pos_enc')(positions)
+```
+
+2.2 GROUNDED VOCABULARY (Rozšířený Slovník)
+-------------------------------------------
+
+V2 slovník (2 slova tvrdě naučená):
+  3 = CARRYING
+  7 = FOUND_TARGET
+
+V3 slovník (rozšířený):
+  0  = SILENCE (mlčení)
+  1  = HELP (žádost o pomoc)
+  2  = DANGER (varování)
+  3  = CARRYING (nesu objekt)
+  4  = NEED_PICKUP (potřebuji odvoz)
+  5  = FOUND_RESOURCE
+  6  = FOUND_ENEMY
+  7  = FOUND_TARGET (cíl)
+  8  = GOING_TO (směřuji k)
+  9  = FOLLOWING (následuji tě)
+  10 = WAITING (čekám)
+  11 = ACKNOWLEDGE (rozumím)
+  12 = NEGATIVE (ne/odmítám)
+  13-31 = EMERGENT (volné pro emergentní významy)
+
+PAYLOAD SEMANTIKA:
+  payload[0:2] = Relativní pozice (x, y) normalizovaná
+  payload[2]   = Urgence (0.0 = low, 1.0 = critical)
+  payload[3]   = Target ID (normalizováno)
+
+2.3 COMMUNICATION CHANNELS (Prioritní Fronty)
+---------------------------------------------
+
+V2: Broadcast všem.
+
+V3: Více kanálů:
+  - BROADCAST: Všichni slyší (ale s klesající sílou podle vzdálenosti)
+  - TARGETED: Zpráva pro konkrétního agenta (ID v payloadu)
+  - TEAM: Pouze členové stejného "týmu" (pokud máme týmy)
+
+```python
+@dataclass
+class Message:
+    sender_id: int
+    token: int           # 0-31
+    payload: jnp.ndarray # [4]
+    channel: str         # "broadcast", "targeted", "team"
+    target_id: int       # -1 for broadcast
+    priority: float      # Pro fronton arbitration
+    timestamp: int
+```
+
+================================================================================
+3. DIAL TRAINING PIPELINE (V3)
+================================================================================
+
+FÁZE 0: VOCABULARY SEEDING (Nové!)
+----------------------------------
+Před DIAL pretrainingem:
+  - Ručně vytvoř datasety situací (agent vidí cíl -> token 7)
+  - Supervised pretraining encoderu na tomto datasetu
+  - Výsledek: Encoder už "ví" základní slovník
+
+FÁZE 1: HARD INJECTION (Stejné jako V2)
+---------------------------------------
+  - Env počítá ground truth token
+  - 100% pravděpodobnost přepsání agentovy zprávy
+
+FÁZE 2: SOFT INJECTION + CURRICULUM (Stejné jako V2)
+-----------------------------------------------------
+  - Injekce klesá z 100% na 0% lineárně (epizody 0-250)
+  - Agenti přecházejí k emergent komunikaci
+
+FÁZE 3: CONTRASTIVE GROUNDING (Nové!)
+-------------------------------------
+Silnější grounding přes kontrastivní loss:
+
+```python
+def contrastive_grounding_loss(messages, states, temperature=0.1):
+    """
+    Podobné stavy -> podobné zprávy.
+    Odlišné stavy -> odlišné zprávy.
+    
+    InfoNCE Loss (podobně jako CLIP).
+    """
+    # Normalizuj
+    msg_norm = messages / jnp.linalg.norm(messages, axis=-1, keepdims=True)
+    state_norm = states / jnp.linalg.norm(states, axis=-1, keepdims=True)
+    
+    # Similarity matrix
+    logits = jnp.matmul(msg_norm, state_norm.T) / temperature
+    
+    # Diagonal = pozitivní páry (same agent)
+    labels = jnp.arange(len(messages))
+    
+    # Cross-entropy loss
+    loss = optax.softmax_cross_entropy_with_integer_labels(logits, labels).mean()
+    return loss
+```
+
+FÁZE 4: JOINT TRAINING (Finále)
+-------------------------------
+  - PPO trénuje pohyb
+  - Komunikační loss se přičítá k PPO loss
+  - Agenti optimalizují: reward + grounding
+
+================================================================================
+4. ATTENTION VIZUALIZACE
+================================================================================
+
+Pro debugging a understanding:
+  - Zobraz attention weights jako čáry mezi agenty
+  - Silnější attention = silnější čára
+  - Pomáhá vidět "kdo koho poslouchá"
+
+```python
+def get_attention_matrix(decoder: TransformerContextDecoder, messages, params):
+    """Extrahuj attention weights pro vizualizaci."""
+    # V Flax můžeme použít intermediates pro získání attention weights
+    # Je třeba modifikovat TransformerContextDecoder aby vracel intermediates
+    
+    # Workaround: Přístup přes params a manuální forward pass
+    # Pro production byste chtěli použít Flax nn.Module.capture_intermediates()
+    
+    attention_weights = []  # [num_layers, num_heads, N, N]
+    # Implementace TBD - závisí na Flax API pro intermediates
+    return attention_weights
+```
+
+================================================================================
+5. BANDWIDTH PENALTY (Zachovat z V2)
+================================================================================
+
+Abychom zabránili "blábolení":
+  - Každé vyslovené slovo (kromě SILENCE) = malý trest
+  - Agenti mluví JEN když to má smysl
+
+```python
+def compute_bandwidth_penalty(tokens, silence_token=0, penalty=-0.01):
+    """Penalizuje zbytečné mluvení."""
+    is_speaking = tokens != silence_token  # [N]
+    return is_speaking.float() * penalty
+```
+
+================================================================================
+6. MESSAGE BUFFER (Temporal Consistency)
+================================================================================
+
+V2: Agenti vidí jen AKTUÁLNÍ zprávy.
+
+V3: Message Buffer uchovává historii:
+
+```python
+@dataclass
+class MessageBuffer:
+    """Ring buffer pro historii zpráv."""
+    buffer: jnp.ndarray  # [MAX_HISTORY, N, MSG_DIM]
+    timestamps: jnp.ndarray  # [MAX_HISTORY]
+    head: int = 0
+    
+    def push(self, messages: jnp.ndarray, timestep: int):
+        self.buffer = self.buffer.at[self.head].set(messages)
+        self.timestamps = self.timestamps.at[self.head].set(timestep)
+        self.head = (self.head + 1) % self.buffer.shape[0]
+    
+    def get_recent(self, n: int) -> jnp.ndarray:
+        """Vrátí posledních n zpráv pro všechny agenty."""
+        indices = jnp.arange(self.head - n, self.head) % self.buffer.shape[0]
+        return self.buffer[indices]  # [n, N, MSG_DIM]
+```
+
+Pro Transformer: vstup může být [batch, history_len * num_agents, msg_dim].
+
+================================================================================
+7. KOMUNIKAČNÍ METRIKY (WandB)
+================================================================================
+
+Logovat:
+  - `comm/token_distribution`: Histogram používaných tokenů
+  - `comm/message_entropy`: Diverzita zpráv (nechceme kolaps)
+  - `comm/grounding_accuracy`: Jak moc token odpovídá situaci
+  - `comm/attention_entropy`: Jak moc je attention rozptýlená vs. fokusovaná
+  - `comm/silence_rate`: % času kdy agenti mlčí
+
+
+Kanály:
+Direct Channel: Agent zvolí Target_ID (výstup sítě) + Zprávu. Zprávu dostane jen adresát. ("Dvojko, kryj mě.").
+Broadcast Channel: "Velitelský kanál" pro nouzové signály všem. ("Ústup!").
+Architektura:
+Sítí nebude protékat jen fixní vektor, ale Attention Graph. Agent si "vybere" (naučí se váhy), koho poslouchat nejvíc.
+Paměť (LSTM/GRU):
+Agenti si musí pamatovat kontext konverzace ("Dvojka mi před chvílí řekla, že tam je zeď, takže tam nepůjdu").
+Spatial Addressing místo ID je game-changer pro škálovatelnost. Eliminuje to nutnost "učení se jmenného seznamu" a funguje to jako laserové ukazovátko. Geniální.
+Gated Communication je nutnost. Bez penalizace za "spam" agenti často zahltí kanál šumem, protože "nic to nestojí". S gate mechanismem se ticho stane defaultním stavem a řeč vzácnou komoditou.
+Predictive Messaging (Telepatie) je přesně to, co odlišuje reaktivní agenty od proaktivního týmu. Sdílení záměrů ("Going Left") je mnohem efektivnější než rozkazy ("Go Left").
+
+================================================================================
+                            KONEC KOMUNIKACE
+           Pokračuj čtením 04_RENDERING.txt pro vizualizační systém.
+================================================================================

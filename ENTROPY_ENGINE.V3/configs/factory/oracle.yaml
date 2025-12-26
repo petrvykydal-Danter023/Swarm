@@ -1,0 +1,33 @@
+oracle_factory:
+  enabled: true
+  
+  generation:
+    num_episodes: 100000
+    maps_per_difficulty:
+      easy: 30000
+      medium: 50000
+      hard: 20000
+    
+  hard_states:
+    enabled: true
+    scenarios_per_type: 5000
+    types: ["narrow_passage", "dead_end", "multi_cross", "dynamic_obs"]
+    harvest_failures: true
+    
+  oracle:
+    navigator:
+      algorithm: "astar"
+      resolution: 10
+      allow_diagonal: true
+    formation:
+      enabled: true
+      types: ["line", "v", "circle"]
+    communication:
+      inject_ground_truth: true
+      
+  storage:
+    path: "data/oracle_demos/"
+    format: "tfrecord"
+    shard_size: 10000
+    compression: "gzip"
+    memory_map: true

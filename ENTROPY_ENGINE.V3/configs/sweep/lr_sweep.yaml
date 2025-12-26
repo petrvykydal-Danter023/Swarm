@@ -1,0 +1,14 @@
+# WandB Sweep config
+method: bayes  # random, grid, bayes
+metric:
+  name: train/reward_mean
+  goal: maximize
+parameters:
+  agent.ppo.learning_rate:
+    min: 0.00001
+    max: 0.01
+    distribution: log_uniform_values
+  agent.ppo.ent_coef:
+    values: [0.0, 0.001, 0.01, 0.1]
+  agent.network.hidden_dim:
+    values: [64, 128, 256, 512]

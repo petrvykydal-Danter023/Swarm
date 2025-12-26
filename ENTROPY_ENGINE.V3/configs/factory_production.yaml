@@ -1,0 +1,66 @@
+factory:
+  pipeline: ["oracle", "kindergarten", "gym", "language_school", "team_building", "war_room", "domain_randomization"]
+  auto_retry: 2
+  
+stations:
+  # STATION 0: ORACLE (Data Generation)
+  oracle:
+    generation:
+      num_episodes: 200          # Enough for a small batch
+      map_difficulty: "medium"
+    expert:
+      type: "privileged_astar"
+    storage:
+      path: "data/short_prod_demos/"
+
+  # STATION 1: KINDERGARTEN (Behavior Cloning)
+  kindergarten:
+    max_epochs: 10               # Quick convergence check
+    batch_size: 128
+    learning_rate: 3e-4
+    target_accuracy: 0.80        # Lower bar for speed checking
+    storage:
+      path: "data/short_prod_demos/"
+
+  # STATION 2: GYM (DAgger - Navigation)
+  gym:
+    target_success_rate: 0.80
+    dagger:
+      max_rounds: 3              # 3 rounds to prove loop works
+      episodes_per_round: 20     # 20 eps * 5 agents = 100 samples
+      gradient_steps: 100
+      ood_threshold: 0.80
+    storage:
+      path: "data/short_prod_demos/"
+
+  # STATION 3: LANGUAGE SCHOOL (Consistency)
+  language_school:
+    max_epochs: 10
+    target_consistency: 0.80
+    storage:
+      path: "data/short_prod_demos/"
+
+  # STATION 4: TEAM BUILDING (MAPPO - Cooperation)
+  team_building:
+    max_epochs: 20               # Short RL run
+    reward_threshold: 10.0       # Low threshold just to pass execution
+    mappo:
+      lr_actor: 3e-4
+      lr_critic: 1e-3
+      actor_updates_per_step: 4
+    storage:
+      path: "data/short_prod_demos/"
+
+  # STATION 5: WAR ROOM (Adversarial Robustness)
+  war_room:
+    epochs_per_scenario: 2       # Just 2 epochs to verify stability
+    survival_threshold: 0.50
+    scenarios: ["sensor_dropout", "physics_friction", "adversarial_agents", "communication_failure"]
+    storage:
+      path: "data/short_prod_demos/"
+
+  # STATION 5.5: DOMAIN RANDOMIZATION (Generalization)
+  domain_randomization:
+    max_gap: 0.50
+    storage:
+      path: "data/short_prod_demos/"

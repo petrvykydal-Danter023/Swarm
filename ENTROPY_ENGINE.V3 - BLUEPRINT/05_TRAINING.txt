@@ -1,0 +1,400 @@
+================================================================================
+                    05_TRAINING.txt
+                    Tréninkový Pipeline (PPO + JAX)
+================================================================================
+
+================================================================================
+1. STACK VOLBA
+================================================================================
+
+V2:
+  - Stable-Baselines3 (PPO)
+  - gymnasium wrapper
+  - CPU-bound, pomalé
+
+V3 MOŽNOSTI:
+
+  PUREJAXRL (Doporučeno):
+    + Celý PPO zkompilovaný do GPU kernelu (XLA)
+    + Miliony kroků za sekundu
+    + Nativní JAX integrace
+    - Strmější learning curve
+
+  CLEANRL:
+    + Jednoduché, čitelné implementace
+    + Snadná modifikace
+    + Dobrá dokumentace
+    - Méně optimalizované než PureJaxRL
+
+  SB3 + JAX ENV (Hybrid):
+    + Známé rozhraní
+    + Rychlé env díky JAX
+    - Data copying CPU<->GPU
+
+================================================================================
+2. PUREJAXRL INTEGRACE
+================================================================================
+
+```python
+import jax
+import jax.numpy as jnp
+from purejaxrl.ppo import PPO, PPOConfig
+from flax import linen as nn
+
+# === ENTROPY CORE < -> PPO INTERFACE ===
+
+class EntropyGymWrapper:
+    """
+    Transformuje WorldState API na Gym-like API pro PPO.
+    Implementuje: reset(), step().
+    Interně používá JAX vektorizovanou simulaci.
+    """
+    def __init__(self, cfg):
+        self.num_agents = cfg.num_agents
+        # Canonical obs_dim from 00_OVERVIEW.txt:
+        # obs_dim = 32 (lidar) + 2 (velocity) + 2 (rel_goal) + context_dim
+        self.obs_dim = 36 + cfg.context_dim  # 36 = 32+2+2
+        self.action_dim = 2  # left_motor, right_motor
+        
+    @partial(jax.jit, static_argnums=(0,))
+    def reset(self, rng: jax.Array) -> tuple:
+        """
+        Returns:
+            state: WorldState
+            obs: [N, obs_dim]
+        """
+        state = create_random_world(rng, self.num_agents)
+        obs = self._get_obs(state)
+        return state, obs
+    
+    @partial(jax.jit, static_argnums=(0,))
+    def step(self, state: WorldState, actions: jnp.ndarray) -> tuple:
+        """
+        Args:
+            state: WorldState
+            actions: [N, action_dim]
+            
+        Returns:
+            state: new WorldState
+            obs: [N, obs_dim]
+            rewards: [N]
+            dones: [N]
+            infos: dict
+        """
+        # 1. Physics step
+        state = physics_step(state, actions)
+        
+        # 2. Communication step
+        state = communication_step(state)
+        
+        # 3. Compute observations
+        obs = self._get_obs(state)
+        
+        # 4. Compute rewards
+        rewards = self._compute_rewards(state)
+        
+        # 5. Check termination
+        dones = state.goal_reached | (state.timestep > self.max_steps)
+        
+        return state, obs, rewards, dones, {}
+    
+    def _get_obs(self, state: WorldState) -> jnp.ndarray:
+        """Sestaví observace pro všechny agenty."""
+        # Lidar [N, 32]
+        lidars = compute_lidars(state)
+        
+        # Velocity [N, 2]
+        velocities = state.agent_velocities / 100.0  # Normalize
+        
+        # Relative goal [N, 2]
+        rel_goals = (state.goal_positions - state.agent_positions) / 1000.0
+        
+        # Communication context [N, context_dim]
+        contexts = state.agent_contexts
+        
+        return jnp.concatenate([lidars, velocities, rel_goals, contexts], axis=-1)
+    
+    def _compute_rewards(self, state: WorldState) -> jnp.ndarray:
+        """Reward shaping."""
+        # Goal distance (negative, closer = better)
+        dist_to_goal = jnp.linalg.norm(state.agent_positions - state.goal_positions, axis=1)
+        r_goal = -dist_to_goal / 1000.0
+        
+        # Goal reached bonus
+        r_reached = state.goal_reached.astype(float) * 10.0
+        
+        # Collision penalty (if applicable)
+        r_collision = 0.0  # Implementuj podle potřeby
+        
+        # Bandwidth penalty
+        r_bandwidth = compute_bandwidth_penalty(state.agent_messages)
+        
+        return r_goal + r_reached + r_collision + r_bandwidth
+
+
+# === PPO TRAINING ===
+
+def train_ppo(cfg):
+    """Hlavní tréninkový loop."""
+    
+    rng = jax.random.PRNGKey(cfg.seed)
+    
+    env = EntropyGymWrapper(cfg)
+    
+    # Inicializace PPO
+    ppo_config = PPOConfig(
+        learning_rate=3e-4,
+        num_steps=2048,
+        num_minibatches=32,
+        update_epochs=10,
+        gamma=0.99,
+        gae_lambda=0.95,
+        clip_coef=0.2,
+        ent_coef=0.01,  # Entropy bonus
+        vf_coef=0.5,
+    )
+    
+    # Neural network (Actor-Critic)
+    network = ActorCritic(
+        obs_dim=env.obs_dim,
+        action_dim=env.action_dim,
+        hidden_dim=256
+    )
+    
+    # Inicializuj parametry
+    rng, init_rng = jax.random.split(rng)
+    dummy_obs = jnp.zeros((cfg.num_agents, env.obs_dim))
+    params = network.init(init_rng, dummy_obs)
+    
+    # Optimizer
+    optimizer = optax.adam(ppo_config.learning_rate)
+    opt_state = optimizer.init(params)
+    
+    # Training state
+    train_state = TrainState(
+        params=params,
+        opt_state=opt_state,
+        step=0
+    )
+    
+    # Rollout buffer
+    buffer = RolloutBuffer(
+        num_steps=ppo_config.num_steps,
+        num_agents=cfg.num_agents,
+        obs_dim=env.obs_dim,
+        action_dim=env.action_dim
+    )
+    
+    # === MAIN LOOP ===
+    for iteration in range(cfg.num_iterations):
+        rng, rollout_rng = jax.random.split(rng)
+        
+        # Collect rollout
+        buffer, env_state = collect_rollout(
+            env, network, train_state.params, buffer, rollout_rng
+        )
+        
+        # Update
+        train_state, metrics = update_ppo(
+            train_state, buffer, network, optimizer, ppo_config
+        )
+        
+        # Log
+        if iteration % cfg.log_interval == 0:
+            wandb.log({
+                "iteration": iteration,
+                "reward_mean": metrics["reward_mean"],
+                "policy_loss": metrics["policy_loss"],
+                "value_loss": metrics["value_loss"],
+                "entropy": metrics["entropy"],
+            })
+    
+    return train_state
+
+
+# === ACTOR-CRITIC NETWORK ===
+
+class ActorCritic(nn.Module):
+    obs_dim: int
+    action_dim: int
+    hidden_dim: int = 256
+    
+    @nn.compact
+    def __call__(self, obs):
+        # Shared trunk
+        x = nn.Dense(self.hidden_dim)(obs)
+        x = nn.relu(x)
+        x = nn.Dense(self.hidden_dim)(x)
+        x = nn.relu(x)
+        
+        # Actor head (policy)
+        actor_mean = nn.Dense(self.action_dim)(x)
+        actor_logstd = self.param('log_std', nn.initializers.zeros, (self.action_dim,))
+        
+        # Critic head (value)
+        value = nn.Dense(1)(x).squeeze(-1)
+        
+        return actor_mean, actor_logstd, value
+```
+
+================================================================================
+3. MULTI-AGENT HANDLING
+================================================================================
+
+V3 má N agentů. Jak je tréninky zvládnout?
+
+PARAMETER SHARING (Doporučeno):
+  - Všechny agenti sdílí JEDNU síť.
+  - Vstup: observation (liší se pro každého agenta)
+  - Výstup: akce (specifická pro agenta)
+  - Benefit: Škáluje na libovolný počet agentů.
+
+```python
+# S parameter sharing:
+# actions = network(all_observations)  # [N, obs_dim] -> [N, action_dim]
+```
+
+INDEPENDENT LEARNERS:
+  - Každý agent má VLASTNÍ síť.
+  - N-krát více parametrů.
+  - Může být nestabilní (nonstationarity).
+
+CENTRALIZED CRITIC (MAPPO):
+  - Actors jsou decentralizované (vidí jen své obs).
+  - Critic vidí GLOBAL STATE (všechny obs + akce).
+  - Lepší credit assignment.
+
+================================================================================
+4. CURRICULUM LEARNING
+================================================================================
+
+```python
+class CurriculumScheduler:
+    """Postupně zvyšuje obtížnost."""
+    
+    def __init__(self, stages: list):
+        """
+        stages = [
+            {"threshold": 0.5, "difficulty": 1},   # Easy until reward > 0.5
+            {"threshold": 0.7, "difficulty": 2},   # Medium until reward > 0.7
+            {"threshold": 1.0, "difficulty": 3},   # Hard
+        ]
+        """
+        self.stages = stages
+        self.current_stage = 0
+        self.reward_history = deque(maxlen=100)
+        
+    def update(self, episode_reward: float) -> int:
+        """Aktualizuj historii a vrať aktuální difficulty."""
+        self.reward_history.append(episode_reward)
+        
+        avg_reward = np.mean(self.reward_history)
+        
+        # Check promotion
+        if self.current_stage < len(self.stages) - 1:
+            threshold = self.stages[self.current_stage]["threshold"]
+            if avg_reward > threshold:
+                self.current_stage += 1
+                print(f"🎓 Curriculum: Promoted to stage {self.current_stage + 1}")
+        
+        return self.stages[self.current_stage]["difficulty"]
+
+# Použití:
+curriculum = CurriculumScheduler([...])
+for episode in range(total_episodes):
+    difficulty = curriculum.update(last_reward)
+    env.set_difficulty(difficulty)
+    # ... train ...
+```
+
+================================================================================
+5. CHECKPOINTING
+================================================================================
+
+```python
+def save_checkpoint(train_state, path: str, metadata: dict = None):
+    """Uloží checkpoint s metadaty."""
+    import safetensors.flax
+    
+    checkpoint = {
+        "params": train_state.params,
+        "opt_state": train_state.opt_state,
+        "step": train_state.step,
+        "metadata": metadata or {}
+    }
+    
+    safetensors.flax.save_file(checkpoint, path)
+    print(f"✅ Saved checkpoint to {path}")
+
+def load_checkpoint(path: str):
+    """Načte checkpoint."""
+    import safetensors.flax
+    
+    checkpoint = safetensors.flax.load_file(path)
+    return checkpoint
+```
+
+================================================================================
+6. WANDB LOGGING
+================================================================================
+
+```python
+import wandb
+
+def setup_wandb(cfg):
+    wandb.init(
+        project="entropy-v3",
+        config=cfg,
+        mode="online",  # nebo "offline" pro lokální
+        sync_tensorboard=True,
+    )
+
+# Async logging (neblokuje trénink)
+wandb.log({...}, commit=False)  # Buffer
+wandb.log({}, commit=True)      # Flush
+
+# Logging artifacts (modely, videa)
+artifact = wandb.Artifact("model-v1", type="model")
+artifact.add_file("checkpoint.safetensors")
+wandb.log_artifact(artifact)
+```
+
+================================================================================
+7. BENCHMARK METRIKY
+================================================================================
+
+CO LOGOVAT:
+  - `train/reward_mean` - Průměrná odměna epizody
+  - `train/reward_std` - Variance
+  - `train/episode_length` - Délka epizody
+  - `train/fps` - Frames per second
+  - `train/sps` - Steps per second (PPO updates)
+  
+  - `loss/policy` - Policy loss
+  - `loss/value` - Value function loss
+  - `loss/entropy` - Entropy bonus
+  - `loss/communication` - Grounding loss (pokud používáme)
+  
+  - `env/goal_reached_rate` - % agentů co dosáhli cíle
+  - `env/collision_rate` - % kroků s kolizí
+  
+  - `system/gpu_memory` - VRAM usage
+  - `system/cpu_memory` - RAM usage
+
+================================================================================
+8. AUTOMATIZACE (Swarm AI Factory)
+================================================================================
+
+Tento tréninkový pipeline je součástí vyššího celku - Swarm AI Factory.
+Místo ručního spouštění tréninků orchestrátor automaticky posílá modely přes:
+- Stanice 1-2 (Pre-training)
+- Stanice 3 (Multimodal Fusion)
+- Stanice 4 (Cooperative RL)
+- Stanice 5 (Stress Testing)
+
+Viz 13_SWARM_AI_FACTORY.txt pro detaily linky.
+
+================================================================================
+                            KONEC TRAINING
+           Pokračuj čtením 06_BRAIN_MANAGER.txt pro správu modelů.
+================================================================================

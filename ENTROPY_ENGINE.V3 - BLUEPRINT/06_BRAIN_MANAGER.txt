@@ -1,0 +1,347 @@
+================================================================================
+                    06_BRAIN_MANAGER.txt
+                    Správa AI Modelů a Checkpointů
+================================================================================
+
+================================================================================
+1. MOTIVACE
+================================================================================
+
+V2 PROBLÉM:
+  - Checkpointy uložené na náhodných místech ("communication_checkpoint.pt", "dial_checkpoint.pt")
+  - Žádné verzování - přepsáním ztratíš starý model
+  - Nejasné interfaces mezi modelem a environmentem
+
+V3 ŘEŠENÍ:
+  - BrainManager = Centrální "Model Zoo"
+  - Verzované ukládání (v1, v2, ...)
+  - Jasné definice vstupů/výstupů
+
+================================================================================
+2. BRAIN REGISTRY
+================================================================================
+
+```python
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Dict, Optional
+import json
+import safetensors.flax
+
+@dataclass
+class BrainMeta:
+    """Metadata o modelu."""
+    name: str
+    version: int
+    brain_type: str  # "ppo", "dial_encoder", "dial_decoder", "transformer"
+    input_dim: int
+    output_dim: int
+    hidden_dim: int
+    created_at: str
+    training_steps: int
+    source_checkpoint: Optional[str] = None  # Pro fine-tuning
+    notes: str = ""
+
+class BrainManager:
+    """
+    Centrální správce všech AI modelů.
+    Umožňuje verzované ukládání, načítání a inference.
+    """
+    
+    def __init__(self, storage_dir: str = "brains/"):
+        self.storage_dir = Path(storage_dir)
+        self.storage_dir.mkdir(parents=True, exist_ok=True)
+        
+        self.registry: Dict[str, BrainMeta] = {}
+        self._load_registry()
+        
+    def _load_registry(self):
+        """Načte registr z disku."""
+        registry_path = self.storage_dir / "registry.json"
+        if registry_path.exists():
+            with open(registry_path) as f:
+                data = json.load(f)
+                for name, meta in data.items():
+                    self.registry[name] = BrainMeta(**meta)
+    
+    def _save_registry(self):
+        """Uloží registr na disk."""
+        registry_path = self.storage_dir / "registry.json"
+        data = {name: vars(meta) for name, meta in self.registry.items()}
+        with open(registry_path, 'w') as f:
+            json.dump(data, f, indent=2)
+    
+    def save(self, name: str, params: dict, meta: BrainMeta):
+        """
+        Uloží model s automatickým verzováním.
+        
+        Args:
+            name: Identifikátor modelu (např. "ppo_agent")
+            params: Flax/JAX parametry sítě
+            meta: Metadata o modelu
+        """
+        # Auto-increment verze
+        existing_versions = [m.version for k, m in self.registry.items() if k.startswith(name)]
+        version = max(existing_versions, default=0) + 1
+        meta.version = version
+        
+        # Vytvoř složku pro model
+        model_dir = self.storage_dir / name / f"v{version}"
+        model_dir.mkdir(parents=True, exist_ok=True)
+        
+        # Ulož parametry (safetensors pro bezpečnost a rychlost)
+        params_path = model_dir / "params.safetensors"
+        safetensors.flax.save_file(params, str(params_path))
+        
+        # Ulož metadata
+        meta_path = model_dir / "meta.json"
+        with open(meta_path, 'w') as f:
+            json.dump(vars(meta), f, indent=2)
+        
+        # Aktualizuj registr
+        full_name = f"{name}_v{version}"
+        self.registry[full_name] = meta
+        self._save_registry()
+        
+        print(f"✅ Saved {full_name} to {model_dir}")
+        return full_name
+    
+    def load(self, name: str, version: Optional[int] = None) -> tuple:
+        """
+        Načte model.
+        
+        Args:
+            name: Identifikátor modelu
+            version: Verze (None = nejnovější)
+            
+        Returns:
+            (params, meta)
+        """
+        if version is None:
+            # Najdi nejnovější
+            matching = [(k, m) for k, m in self.registry.items() if k.startswith(name)]
+            if not matching:
+                raise ValueError(f"Model '{name}' not found")
+            full_name, meta = max(matching, key=lambda x: x[1].version)
+            version = meta.version
+        else:
+            full_name = f"{name}_v{version}"
+            if full_name not in self.registry:
+                raise ValueError(f"Model '{full_name}' not found")
+            meta = self.registry[full_name]
+        
+        # Načti parametry
+        model_dir = self.storage_dir / name / f"v{version}"
+        params_path = model_dir / "params.safetensors"
+        params = safetensors.flax.load_file(str(params_path))
+        
+        print(f"✅ Loaded {full_name}")
+        return params, meta
+    
+    def list_models(self) -> list:
+        """Vrátí seznam všech modelů."""
+        return list(self.registry.keys())
+    
+    def get_latest(self, name: str) -> Optional[str]:
+        """Vrátí full_name nejnovější verze."""
+        matching = [k for k in self.registry.keys() if k.startswith(name)]
+        if not matching:
+            return None
+        return max(matching, key=lambda k: self.registry[k].version)
+```
+
+================================================================================
+3. INFERENCE WRAPPER
+================================================================================
+
+```python
+import jax
+import jax.numpy as jnp
+from flax import linen as nn
+
+class BrainInference:
+    """
+    High-level wrapper pro inference.
+    Skrývá detaily architektury.
+    """
+    
+    def __init__(self, manager: BrainManager, model_name: str, network_class):
+        params, meta = manager.load(model_name)
+        self.params = params
+        self.meta = meta
+        
+        # Rekonstruuj síť
+        self.network = network_class(
+            obs_dim=meta.input_dim,
+            action_dim=meta.output_dim,
+            hidden_dim=meta.hidden_dim
+        )
+        
+    @partial(jax.jit, static_argnums=(0,))
+    def act(self, obs: jnp.ndarray, deterministic: bool = False) -> jnp.ndarray:
+        """
+        Vrátí akci pro danou observaci.
+        
+        Args:
+            obs: [batch, obs_dim] nebo [obs_dim]
+            deterministic: True = mean, False = sample
+            
+        Returns:
+            actions: [batch, action_dim] nebo [action_dim]
+        """
+        if obs.ndim == 1:
+            obs = obs[None, :]
+            squeeze = True
+        else:
+            squeeze = False
+        
+        mean, log_std, value = self.network.apply(self.params, obs)
+        
+        if deterministic:
+            actions = mean
+        else:
+            std = jnp.exp(log_std)
+            actions = mean + std * jax.random.normal(jax.random.PRNGKey(0), mean.shape)
+        
+        actions = jnp.tanh(actions)  # Clamp to [-1, 1]
+        
+        if squeeze:
+            actions = actions.squeeze(0)
+        
+        return actions
+
+
+# === PŘÍKLAD POUŽITÍ ===
+
+manager = BrainManager("brains/")
+
+# Uložení po tréninku
+meta = BrainMeta(
+    name="ppo_swarm",
+    version=0,  # Auto-increment
+    brain_type="ppo",
+    input_dim=100,
+    output_dim=2,
+    hidden_dim=256,
+    created_at="2024-12-24",
+    training_steps=1_000_000,
+    notes="First successful run with 100 agents"
+)
+manager.save("ppo_swarm", train_state.params, meta)
+
+# Načtení pro inference
+brain = BrainInference(manager, "ppo_swarm", ActorCritic)
+action = brain.act(observation)
+```
+
+================================================================================
+4. KOMUNIKAČNÍ BRAIN (DIAL)
+================================================================================
+
+Separátní typ modelu pro encoder/decoder:
+
+```python
+@dataclass
+class DIALBrainPair:
+    """Encoder + Decoder pár pro komunikaci."""
+    encoder_params: dict
+    decoder_params: dict
+    vocab_size: int
+    payload_dim: int
+    context_dim: int
+
+class DIALBrainManager:
+    """Specializovaný manager pro DIAL modely."""
+    
+    def save_dial(self, name: str, encoder_params, decoder_params, config):
+        pair = DIALBrainPair(
+            encoder_params=encoder_params,
+            decoder_params=decoder_params,
+            vocab_size=config.vocab_size,
+            payload_dim=config.payload_dim,
+            context_dim=config.context_dim
+        )
+        # ... save ...
+    
+    def load_dial(self, name: str) -> DIALBrainPair:
+        # ... load ...
+        pass
+```
+
+================================================================================
+5. MODEL ZOO (Předtrénované Modely)
+================================================================================
+
+Organizace složky `brains/`:
+
+```
+brains/
+├── registry.json           # Centrální index
+├── ppo_swarm/
+│   ├── v1/
+│   │   ├── params.safetensors
+│   │   └── meta.json
+│   ├── v2/
+│   │   ├── params.safetensors
+│   │   └── meta.json
+│   └── latest -> v2/       # Symlink
+├── dial_encoder/
+│   ├── v1/
+│   └── v2/
+├── dial_decoder/
+│   └── v1/
+└── transformer_context/
+    └── v1/
+```
+
+================================================================================
+6. MIGRACE Z V2
+================================================================================
+
+Konverze starých checkpointů:
+
+```python
+def migrate_v2_checkpoint(old_path: str, manager: BrainManager):
+    """Převede V2 checkpoint do V3 formátu."""
+    import torch
+    
+    # Načti starý formát (PyTorch)
+    old_ckpt = torch.load(old_path, map_location='cpu')
+    
+    # Převeď na JAX/Flax formát
+    # (Závisí na architektuře - nutno mapovat ručně)
+    new_params = convert_torch_to_flax(old_ckpt)
+    
+    # Ulož do V3
+    meta = BrainMeta(
+        name="migrated_dial",
+        version=0,
+        brain_type="dial_encoder",
+        input_dim=8,  # Z V2 DIAL
+        output_dim=36,  # 32 tokens + 4 payload
+        hidden_dim=64,
+        created_at=datetime.now().isoformat(),
+        training_steps=0,
+        source_checkpoint=old_path,
+        notes="Migrated from V2"
+    )
+    
+    manager.save("dial_encoder", new_params, meta)
+```
+
+================================================================================
+7. FACTORY REGISTRY (Rodokmen Modelů)
+================================================================================
+
+BrainManager slouží jako datová vrstva pro Swarm AI Factory.
+Při tréninku v sekvenci stanic (linka) ukládá:
+- `lineage.json`: Kdo je "otec" modelu (např. v2 ze Stanice 2 je otcem v3 ze Stanice 3)
+- `quality_report.json`: Výsledky QA Gate z dané stanice
+- `frozen_experts/`: Symlinky na modely použité pro fusion
+
+Viz 13_SWARM_AI_FACTORY.txt pro detaily linky.
+
+================================================================================
+                            KONEC BRAIN MANAGER
+           Pokračuj čtením 07_CONFIG_SYSTEM.txt pro konfigurace.
+================================================================================

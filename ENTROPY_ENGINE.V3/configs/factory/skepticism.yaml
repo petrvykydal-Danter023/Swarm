@@ -1,0 +1,25 @@
+adaptive_skepticism:
+  enabled: true
+  
+  per_station:
+    station_1_2:
+      mode: "fixed"
+      error_rate: 0.0
+    station_3:
+      mode: "adaptive"
+      start_rate: 0.0
+      max_rate: 0.05
+      success_threshold: 0.90
+    station_4:
+      mode: "adaptive"
+      start_rate: 0.02
+      max_rate: 0.10
+      crisis_threshold: 0.70
+    station_5:
+      mode: "adaptive"
+      start_rate: 0.05
+      max_rate: 0.20
+      
+  adjust_interval: 1000
+  increase_step: 0.01
+  decrease_step: 0.02

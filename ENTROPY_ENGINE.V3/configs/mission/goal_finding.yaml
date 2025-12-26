@@ -1,0 +1,26 @@
+# @package mission
+
+name: "goal_finding"
+description: "Agent must navigate to their assigned goal"
+
+rewards:
+  goal_reached: 10.0
+  distance_penalty_scale: 0.001  # Penalty per unit distance
+  collision_penalty: -0.1
+  step_penalty: -0.001
+
+curriculum:
+  enabled: true
+  stages:
+    - threshold: 0.3
+      difficulty: 1
+      config_overrides:
+        goal_distance_max: 200
+    - threshold: 0.6
+      difficulty: 2
+      config_overrides:
+        goal_distance_max: 400
+    - threshold: 0.9
+      difficulty: 3
+      config_overrides:
+        goal_distance_max: 800

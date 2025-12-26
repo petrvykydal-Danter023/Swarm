@@ -1,0 +1,313 @@
+================================================================================
+                    08_MIGRATION_FROM_V2.txt
+                    Co Přenést, Co Zahodit, Jak Migrovat
+================================================================================
+
+================================================================================
+1. CO PŘENÉST Z V2 ✓
+================================================================================
+
+DIAL KOMUNIKAČNÍ LOGIKA:
+  ✓ Hybrid Message Format (32 tokens + 4 payload)
+  ✓ Hard Injection / Soft Injection curriculum
+  ✓ Ground Truth Token Calculation Logic
+  ✓ Bandwidth Penalty
+  ✓ Message Consistency Reward Formula
+
+  Soubory:
+    - neuro/communication/network.py -> portovat do JAX/Flax
+    - neuro/communication/dial_trainer.py -> adaptovat na PureJaxRL
+    - neuro/communication/protocol.py -> kopírovat vocab enum
+
+REWARD SHAPING:
+  ✓ Goal Distance Reward
+  ✓ Collision Penalty
+  ✓ Step Penalty
+  ✓ Communication Grounding Bonus
+
+  Zkopírovat logiku z entropy/env/entropy_env.py (_compute_rewards)
+
+VIZUALIZAČNÍ KONCEPTY:
+  ✓ Aura barvy podle tokenu
+  ✓ Lidar vizualizace (optional)
+  ✓ Token text nad agentem
+
+  Přenést color mapping z entropy/rendering/renderer.py
+
+CURRICULUM LEARNING:
+  ✓ Difficulty levels (easy/medium/hard)
+  ✓ Arena size scaling
+  ✓ Goal distance scaling
+
+================================================================================
+2. CO ZAHODIT ✗
+================================================================================
+
+PYMUNK:
+  ✗ Celá physics implementace (pymunk.Body, pymunk.Space)
+  ✗ Per-agent for loopy pro kolize
+  ✗ CPU-only raycast
+
+  Nahradit: JAX vektorizovaná fyzika nebo Brax
+
+PYGAME RENDERING:
+  ✗ pygame.display
+  ✗ Blokující render loop
+  ✗ Pevné spárování render + simulation
+
+  Nahradit: Vispy + ZeroMQ (headless-first)
+
+STABLE-BASELINES3 (volitelně):
+  ✗ DummyVecEnv/SubprocVecEnv wrappers
+  ✗ CPU-bound PPO
+
+  Nahradit: PureJaxRL nebo zachovat SB3 s JAX env
+
+AD-HOC SKRIPTY:
+  ✗ train_v1.py, train_phase1_dial.py, train_phase2_hybrid.py...
+  
+  Nahradit: Jeden train.py + Hydra configs
+
+OOP ENTITY MODEL:
+  ✗ class Agent(Entity)
+  ✗ class Goal(Entity)
+  
+  Nahradit: ECS + SoA arrays
+
+================================================================================
+3. MIGRACE PO KROCÍCH
+================================================================================
+
+KROK 1: SETUP PROJEKTU
+----------------------
+```bash
+mkdir ENTROPY_ENGINE.V3
+cd ENTROPY_ENGINE.V3
+
+# Struktura
+mkdir -p entropy/core entropy/brain entropy/render entropy/training
+mkdir -p configs brains
+
+# Dependencies
+cat > requirements.txt << EOF
+jax[cuda12]>=0.4.0
+flax>=0.8.0
+optax>=0.2.0
+brax>=0.10.0
+vispy>=0.14.0
+hydra-core>=1.3.0
+omegaconf>=2.3.0
+wandb>=0.16.0
+safetensors>=0.4.0
+rich>=13.0.0
+EOF
+
+pip install -r requirements.txt
+```
+
+KROK 2: WORLD STATE
+-------------------
+Implementuj WorldState dataclass (viz 01_CORE_PHYSICS.txt):
+```python
+# entropy/core/world.py
+from dataclasses import dataclass
+import jax.numpy as jnp
+
+@dataclass
+class WorldState:
+    agent_positions: jnp.ndarray
+    # ... (zkopíruj z blueprintu)
+```
+
+KROK 3: PHYSICS STEP
+--------------------
+Portuj physics logiku:
+```python
+# entropy/core/physics.py
+
+@jax.jit
+def physics_step(state, actions, dt=0.1):
+    # Zkopíruj differential drive logiku z V2
+    # Převeď for loopy na jax.vmap
+    pass
+```
+
+KROK 4: REWARD
+--------------
+```python
+# entropy/core/rewards.py
+
+@jax.jit  
+def compute_rewards(state):
+    # Portuj z V2 entropy_env._compute_rewards()
+    pass
+```
+
+KROK 5: KOMUNIKACE
+------------------
+```python
+# entropy/brain/dial.py
+
+# Konvertuj PyTorch modely na Flax
+class CommunicationEncoder(nn.Module):
+    # Zkopíruj architekturu z V2 neuro/communication/network.py
+    # Přepiš z torch.nn na flax.linen
+    pass
+```
+
+KROK 6: TRÉNINK
+---------------
+```python
+# entropy/training/train.py
+
+@hydra.main(...)
+def main(cfg):
+    env = EntropyEnv(cfg.env)
+    agent = PPOAgent(cfg.agent)
+    train_loop(env, agent, cfg.training)
+```
+
+KROK 7: TESTOVÁNÍ
+-----------------
+```python
+# tests/test_physics.py
+
+def test_physics_step_batch():
+    state = create_test_world(num_agents=100)
+    actions = jnp.zeros((100, 2))
+    new_state = physics_step(state, actions)
+    assert new_state.timestep == 1
+```
+
+KROK 8: BENCHMARK
+-----------------
+```bash
+python benchmark.py env.num_agents=1000 render=disabled
+# Target: 10,000+ FPS
+```
+
+================================================================================
+4. KONVERZE CHECKPOINTŮ
+================================================================================
+
+V2 používá PyTorch (.pt), V3 používá Flax/safetensors.
+
+```python
+# scripts/migrate_checkpoint.py
+
+import torch
+import jax.numpy as jnp
+
+def torch_to_jax(torch_dict):
+    """Konvertuj PyTorch state_dict na JAX pytree."""
+    jax_dict = {}
+    for key, value in torch_dict.items():
+        # Přejmenuj klíče podle Flax konvence
+        new_key = key.replace('.', '/')  # torch: layer.weight -> flax: layer/weight
+        jax_dict[new_key] = jnp.array(value.numpy())
+    return jax_dict
+
+def migrate_dial_checkpoint(v2_path, v3_manager):
+    """Migruj DIAL checkpoint z V2 do V3."""
+    v2_ckpt = torch.load(v2_path, map_location='cpu')
+    
+    # Extrahuj encodery
+    for i, enc_state in enumerate(v2_ckpt['encoders']):
+        jax_params = torch_to_jax(enc_state)
+        v3_manager.save(f"dial_encoder_{i}", jax_params, meta=...)
+    
+    # Extrahuj decodery
+    for i, dec_state in enumerate(v2_ckpt['decoders']):
+        jax_params = torch_to_jax(dec_state)
+        v3_manager.save(f"dial_decoder_{i}", jax_params, meta=...)
+    
+    print("✅ Migration complete")
+```
+
+================================================================================
+5. VALIDACE MIGRACE
+================================================================================
+
+Test, že V3 produkuje podobné výsledky jako V2:
+
+```python
+def validate_migration():
+    """Ověř, že V3 output matchuje V2 pro stejný input."""
+    
+    # Načti V2 model
+    v2_encoder = load_v2_encoder("v2_checkpoint.pt")
+    
+    # Načti migrovaný V3 model
+    v3_encoder = load_v3_encoder("dial_encoder_0")
+    
+    # Testovací vstup
+    test_obs = np.random.randn(8).astype(np.float32)
+    
+    # V2 inference
+    with torch.no_grad():
+        v2_output = v2_encoder(torch.tensor(test_obs))
+    
+    # V3 inference
+    v3_output = v3_encoder.apply(params, jnp.array(test_obs))
+    
+    # Porovnání
+    diff = np.abs(v2_output.numpy() - np.array(v3_output)).max()
+    print(f"Max difference: {diff}")
+    assert diff < 1e-5, "Migration validation failed!"
+    print("✅ Migration validated")
+```
+
+================================================================================
+6. TIMELINE
+================================================================================
+
+  TÝDEN 1:
+    - [ ] Projekt setup
+    - [ ] WorldState + basic physics
+    - [ ] Unit testy pro fyziku
+
+  TÝDEN 2:
+    - [ ] Lidar compute (vektorizovaný)
+    - [ ] Reward computation
+    - [ ] Základní env wrapper
+
+  TÝDEN 3:
+    - [ ] DIAL encoder/decoder port
+    - [ ] BrainManager
+    - [ ] Checkpoint migration script
+
+  TÝDEN 4:
+    - [ ] PPO training loop (PureJaxRL)
+    - [ ] WandB integration
+    - [ ] Hydra configs
+
+  TÝDEN 5:
+    - [ ] Vispy rendering
+    - [ ] ZeroMQ camera server
+    - [ ] Video export
+
+  TÝDEN 6:
+    - [ ] End-to-end testing
+    - [ ] Benchmark optimization
+    - [ ] Documentation
+
+================================================================================
+7. RIZIKA A MITIGACE
+================================================================================
+
+RIZIKO: JAX learning curve
+  Mitigace: Začni s NumPy prototypem, pak přidej @jax.jit
+
+RIZIKO: PyTorch <-> JAX bridge pro Transformer decoder
+  Mitigace: Buď portuj Transformer do Flax, nebo běž inference mimo JAX loop
+
+RIZIKO: Vispy issues na Windows
+  Mitigace: DearPyGui jako fallback
+
+RIZIKO: Brax verze nekompatibility
+  Mitigace: Pin verze v requirements, testuj na čistém venv
+
+================================================================================
+                            KONEC MIGRATION
+           Pokračuj čtením 09_OBJECTS_AND_SIMULATION.txt.
+================================================================================

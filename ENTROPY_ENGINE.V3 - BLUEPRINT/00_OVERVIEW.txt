@@ -1,0 +1,193 @@
+================================================================================
+                    ENTROPY ENGINE V3 - MASTER BLUEPRINT
+                         "Od Prototypu k Produkci"
+================================================================================
+
+TENTO DOKUMENT JE ROZCESTNÍK. Ostatní soubory v této složce obsahují detaily.
+
+================================================================================
+1. PROČ V3? (Motivace)
+================================================================================
+
+V2 byl ÚSPĚŠNÝ PROTOTYP. Ověřili jsme:
+  - Fyziku agentů (pymunk)
+  - Základní RL (PPO, SB3)
+  - Emergentní komunikaci (DIAL)
+  - Vizualizaci (pygame)
+
+ALE V2 má TECHNICKÝ DLUH:
+  - MONOLIT: EntropyEnv dělá vše (fyzika, rendering, RL, komunikace).
+  - POMALOST: O(N²) kontroly v Pythonu -> max ~50 agentů.
+  - KŘEHKOST: Změna v renderingu rozbíjí trénink.
+  - GULÁŠ: train_v1.py, train_phase1.py, train_phase2_hybrid.py...
+
+V3 = Čistá, rychlá, škálovatelná architektura pro 500+ agentů.
+
+================================================================================
+2. KLÍČOVÉ PRINCIPY V3
+================================================================================
+
+PRINCIP 1: SEPARACE ZÁJMŮ (Single Responsibility)
+  - Každý modul dělá JEDNU věc a dělá ji dobře.
+  - Fyzika neví o renderingu. Rendering neví o AI.
+
+PRINCIP 2: DATA-ORIENTED DESIGN
+  - Místo objektů (Agent, Goal) používáme POLE DAT.
+  - Umožňuje GPU akceleraci a vektorizaci.
+
+PRINCIP 3: CONFIG-DRIVEN
+  - Mise, mapy, hyperparametry = YAML soubory.
+  - Žádné "magické konstanty" v kódu.
+
+PRINCIP 4: HEADLESS-FIRST
+  - Trénink běží BEZ grafiky (maximální rychlost).
+  - Kameru připojíš jen když se chceš DÍVAT.
+
+================================================================================
+3. ARCHITEKTURA (Top Level)
+================================================================================
+
+                    ┌─────────────────────────────────────┐
+                    │          CONFIG (Hydra)             │
+                    │   missions.yaml, agents.yaml, ...   │
+                    └───────────────┬─────────────────────┘
+                                    │ Načítá
+                                    ▼
+    ┌───────────────────────────────────────────────────────────────────┐
+    │                         ENTROPY CORE                              │
+    │  ┌─────────────┐   ┌─────────────┐   ┌─────────────────────────┐  │
+    │  │   WORLD     │   │  ENTITIES   │   │      SYSTEMS            │  │
+    │  │  (Physics)  │◄──│  (ECS Data) │──►│ (Physics, Comm, Reward) │  │
+    │  │  JAX/Brax   │   │  SoA Arrays │   │  Vektorized Functions   │  │
+    │  └─────────────┘   └─────────────┘   └─────────────────────────┘  │
+    └───────────────────────────────┬───────────────────────────────────┘
+                                    │ Poskytuje STATE
+                    ┌───────────────┴───────────────┐
+                    │                               │
+                    ▼                               ▼
+    ┌───────────────────────────┐   ┌───────────────────────────────────┐
+    │      BRAIN MANAGER        │   │        RENDER SERVER              │
+    │   (Model Zoo, Checkpts)   │   │   (Optional, Vispy/DearPyGui)     │
+    │   PyTorch, Transformers   │   │   GPU-accelerated visualization   │
+    └─────────────┬─────────────┘   └───────────────────────────────────┘
+                  │ Inference / Training
+                  ▼
+    ┌───────────────────────────────────────────────────────────────────┐
+    │                      TRAINING LOOP                                │
+    │               PureJaxRL / CleanRL (XLA-compiled PPO)              │
+    │               WandB Async Logging                                 │
+    └───────────────────────────────────────────────────────────────────┘
+
+================================================================================
+4. SOUBORY V TÉTO SLOŽCE
+================================================================================
+
+  00_OVERVIEW.txt         <- TENTO SOUBOR (rozcestník)
+  01_CORE_PHYSICS.txt     <- JAX/Brax fyzikální engine, WorldState
+  02_ECS_ENTITIES.txt     <- Entity-Component-System, datové struktury
+  03_COMMUNICATION.txt    <- Hybrid komunikace, DIAL, Vocabulary
+  04_RENDERING.txt        <- Vispy/DearPyGui, "Camera" koncept, Ghost Mode
+  05_TRAINING.txt         <- PPO pipeline, PureJaxRL, Curriculum
+  06_BRAIN_MANAGER.txt    <- Checkpointing, Model Zoo, Inference
+  07_CONFIG_SYSTEM.txt    <- Hydra, YAML mise, experimenty
+  08_MIGRATION_FROM_V2.txt<- Co přenést z V2, co zahodit
+  09_OBJECTS_AND_SIMULATION.txt <- Objekty, terén, Sim-to-Real
+  10_EXTENSIBILITY_EXAMPLES.txt <- Jak přidávat nové věci
+  11_HAND_OF_GOD.txt      <- Asistované učení (Shared Autonomy)
+  12_TESTING_AND_VALIDATION.txt <- Testy, smoke testy, CI/CD
+  13_SWARM_AI_FACTORY.txt <- Automatizovaná výrobní linka AI modelů
+
+================================================================================
+5. TECH STACK (Doporučený)
+================================================================================
+
+  KOMPONENTA          TECHNOLOGIE           DŮVOD
+  ─────────────────────────────────────────────────────────────────────
+  Core Physics        JAX + Brax            GPU nativní, miliony FPS
+  ECS Data            JAX pytree / NumPy    Vektorizace, JIT kompilace
+  Rendering           Vispy / DearPyGui     OpenGL, nízká latence
+  AI Training         PureJaxRL / CleanRL   XLA-kompilované PPO
+  Communication       PyTorch (Transformer) Flexibilita pro NLP modely
+  Logging             WandB (async mode)    Neblokující monitoring
+  Config              Hydra + OmegaConf     Hierarchické experimenty
+  Serialization       safetensors / pickle  Rychlé ukládání checkpointů
+
+================================================================================
+6. FÁZE IMPLEMENTACE
+================================================================================
+
+  FÁZE 1: ZÁKLAD (1-2 týdny)
+    [ ] WorldState dataclass (pozice, rychlosti, komunikace)
+    [ ] Základní JAX physics step (2D differential drive)
+    [ ] Unit testy pro fyziku
+
+  FÁZE 2: ECS + SYSTÉMY (1 týden)
+    [ ] ECS registry (entity ID -> komponenty)
+    [ ] PhysicsSystem, CommunicationSystem, RewardSystem
+    [ ] Benchmark: 1000 agentů @ 60 FPS (CPU), 10k @ 60 FPS (GPU)
+
+  FÁZE 3: BRAIN (1-2 týdny)
+    [ ] Portovat DIAL encoder/decoder z V2
+    [ ] BrainManager s verzováním checkpointů
+    [ ] Inference loop (JAX <-> PyTorch bridge pokud nutné)
+
+  FÁZE 4: TRAINING (1 týden)
+    [ ] PureJaxRL PPO integrace
+    [ ] WandB async logging
+    [ ] Curriculum callback
+
+  FÁZE 5: RENDER (1 týden)
+    [ ] Vispy 2D scene
+    [ ] "Camera" socket pro headless připojení
+    [ ] Aura vizualizace (komunikace)
+
+  FÁZE 6: POLISH (ongoing)
+    [ ] Config systém (Hydra)
+    [ ] CLI pro experimenty
+    [ ] Dokumentace
+
+================================================================================
+7. METRIKY ÚSPĚCHU
+================================================================================
+
+  RYCHLOST:
+    - 10,000 agentů @ 60 FPS na RTX 3080 (headless)
+    - 1 milion environment steps / sekundu
+
+  ŠKÁLOVATELNOST:
+    - Jeden kód pro 5 i 500 agentů (bez úprav)
+
+  MODULARITA:
+    - Změna rendereru NEROZBIJE trénink
+    - Změna fyziky NEROZBIJE komunikaci
+
+  EXPERIMENTY:
+    - Nový experiment = nový YAML soubor (ne nový .py skript)
+
+================================================================================
+8. KANONICKÉ DIMENZE (Pro konzistenci)
+================================================================================
+
+  OBSERVATION SPACE:
+    obs_dim = 32 (lidar) + 2 (velocity) + 2 (rel_goal) + context_dim
+    
+    Kde context_dim závisí na komunikačním modulu:
+      - Min: 0 (žádná komunikace)
+      - Default: 64 (Transformer decoder output)
+      - Max: 128 (rozšířený context)
+    
+    Příklad: obs_dim = 32 + 2 + 2 + 64 = 100
+
+  ACTION SPACE:
+    action_dim = 2 (left_motor, right_motor)
+    Range: [-1, 1] (continuous)
+
+  COMMUNICATION:
+    msg_dim = 36 (32 token logits + 4 payload floats)
+    vocab_size = 32 (tokens 0-31)
+    payload_dim = 4
+
+================================================================================
+                            KONEC OVERVIEW
+           Pokračuj čtením 01_CORE_PHYSICS.txt pro fyzikální jádro.
+================================================================================

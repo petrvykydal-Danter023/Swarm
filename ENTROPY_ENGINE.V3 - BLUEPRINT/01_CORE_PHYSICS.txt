@@ -1,0 +1,261 @@
+================================================================================
+                    01_CORE_PHYSICS.txt
+                    JAX/Brax Fyzikální Jádro
+================================================================================
+
+================================================================================
+1. FILOSOFIE
+================================================================================
+
+V2 PROBLÉM:
+  - pymunk je CPU-only.
+  - Každý agent = Python objekt = pomalé.
+  - agent.update_sensors() = for loop přes všechny paprsky = O(N*R).
+
+V3 ŘEŠENÍ:
+  - JAX = NumPy, ale kompiluje se do GPU kernelů.
+  - Brax = fyzikální engine postavený na JAX (od Google DeepMind).
+  - VŠECHNO je vektorizované. Žádné for loopy.
+
+================================================================================
+2. WORLDSTATE - Centrální Datová Struktura
+================================================================================
+
+Místo objektů (Agent, Goal, Wall) máme JEDNO PYTREE:
+
+```python
+from dataclasses import dataclass
+from jax import numpy as jnp
+
+@dataclass
+class WorldState:
+    """
+    Všechna data simulace v Structure-of-Arrays (SoA) formátu.
+    Umožňuje plnou vektorizaci a JIT kompilaci.
+    """
+    # === AGENTI [N, ...] ===
+    agent_positions: jnp.ndarray    # [N, 2] - x, y
+    agent_velocities: jnp.ndarray   # [N, 2] - vx, vy
+    agent_angles: jnp.ndarray       # [N] - radians
+    agent_ang_velocities: jnp.ndarray # [N] - omega
+    agent_radii: jnp.ndarray        # [N] - collision radius
+    
+    # === KOMUNIKACE [N, ...] ===
+    agent_messages: jnp.ndarray     # [N, MSG_DIM] - current broadcast
+    agent_contexts: jnp.ndarray     # [N, CTX_DIM] - decoded from others
+    
+    # === INVENTORY [N, ...] ===
+    agent_carrying: jnp.ndarray     # [N] - ID of carried object (-1 = none)
+    
+    # === CÍLE [N, ...] ===
+    goal_positions: jnp.ndarray     # [N, 2] - each agent has a goal
+    goal_radii: jnp.ndarray         # [N] - goal trigger radius
+    goal_reached: jnp.ndarray       # [N] - bool, has agent reached goal?
+    
+    # === ZDI [W, 4] ===
+    wall_segments: jnp.ndarray      # [W, 4] - (x1, y1, x2, y2)
+    
+    # === OBJEKTY [O, ...] ===
+    object_positions: jnp.ndarray   # [O, 2]
+    object_types: jnp.ndarray       # [O] - enum (RESOURCE, OBSTACLE, ...)
+    object_carried_by: jnp.ndarray  # [O] - agent ID or -1
+    
+    # === METADATA ===
+    num_agents: int              # Number of agents in simulation
+    timestep: int
+    arena_size: tuple  # (width, height)
+```
+
+PROČ SoA (Structure of Arrays)?
+  - GPU miluje KONTIGUÁLNÍ PAMĚŤ.
+  - `agent_positions[0:100]` = jeden memory fetch.
+  - V OOP by `agents[0].position, agents[1].position...` = 100 fetches.
+
+================================================================================
+3. PHYSICS STEP - Jádro Simulace
+================================================================================
+
+```python
+import jax
+import jax.numpy as jnp
+
+@jax.jit
+def physics_step(state: WorldState, actions: jnp.ndarray, dt: float = 0.1) -> WorldState:
+    """
+    Jeden krok simulace. PLNĚ vektorizovaný.
+    
+    Args:
+        state: Aktuální WorldState
+        actions: [N, 2] - (left_motor, right_motor) pro každého agenta
+        dt: Časový krok
+        
+    Returns:
+        Nový WorldState
+    """
+    # === 1. DIFFERENTIAL DRIVE ===
+    # Rozparsuj akce
+    left_motor = actions[:, 0]   # [N]
+    right_motor = actions[:, 1]  # [N]
+    
+    # Výpočet lineární a angulární rychlosti (tank drive)
+    wheel_base = 20.0  # Vzdálenost kol
+    max_speed = 100.0
+    
+    v_left = left_motor * max_speed
+    v_right = right_motor * max_speed
+    
+    linear_v = (v_left + v_right) / 2.0
+    angular_v = (v_right - v_left) / wheel_base
+    
+    # === 2. INTEGRACE (Euler) ===
+    # Nové úhly
+    new_angles = state.agent_angles + angular_v * dt
+    
+    # Rychlost ve world-space
+    cos_a = jnp.cos(new_angles)
+    sin_a = jnp.sin(new_angles)
+    vx = linear_v * cos_a
+    vy = linear_v * sin_a
+    
+    new_velocities = jnp.stack([vx, vy], axis=1)  # [N, 2]
+    
+    # Nové pozice
+    new_positions = state.agent_positions + new_velocities * dt
+    
+    # === 3. KOLIZE SE ZDMI (Vektorized) ===
+    new_positions = _clamp_to_arena(new_positions, state.arena_size, state.agent_radii)
+    
+    # === 4. KOLIZE MEZI AGENTY (Spatial Hash nebo Brax contact) ===
+    new_positions = _resolve_agent_collisions(new_positions, state.agent_radii)
+    
+    # === 5. GOAL CHECK ===
+    dist_to_goal = jnp.linalg.norm(new_positions - state.goal_positions, axis=1)
+    new_goal_reached = dist_to_goal < state.goal_radii
+    
+    # === 6. UPDATE STATE (Immutable) ===
+    return state.replace(
+        agent_positions=new_positions,
+        agent_velocities=new_velocities,
+        agent_angles=new_angles,
+        agent_ang_velocities=jnp.full_like(state.agent_ang_velocities, angular_v),
+        goal_reached=new_goal_reached,
+        timestep=state.timestep + 1
+    )
+
+@jax.jit
+def _clamp_to_arena(positions, arena_size, radii):
+    """Omezí pozice na hranice arény."""
+    w, h = arena_size
+    x = jnp.clip(positions[:, 0], radii, w - radii)
+    y = jnp.clip(positions[:, 1], radii, h - radii)
+    return jnp.stack([x, y], axis=1)
+```
+
+================================================================================
+4. LIDAR SENZORY (Vektorizované)
+================================================================================
+
+```python
+@jax.jit
+def compute_lidars(state: WorldState, num_rays: int = 32, max_range: float = 300.0) -> jnp.ndarray:
+    """
+    Batch raycast pro všechny agenty najednou.
+    
+    Returns:
+        [N, num_rays] - normalizované vzdálenosti (0=blízko, 1=max_range)
+    """
+    N = state.agent_positions.shape[0]
+    
+    # Úhly paprsků pro jednoho agenta
+    ray_angles = jnp.linspace(0, 2 * jnp.pi, num_rays, endpoint=False)  # [R]
+    
+    # Pro každého agenta: globální úhly paprsků
+    # [N, R] = [N, 1] + [R]
+    global_angles = state.agent_angles[:, None] + ray_angles[None, :]
+    
+    # Start pozice (od okraje agenta)
+    # [N, R, 2]
+    start_offset = jnp.stack([jnp.cos(global_angles), jnp.sin(global_angles)], axis=-1)
+    starts = state.agent_positions[:, None, :] + start_offset * state.agent_radii[:, None, None]
+    
+    # End pozice
+    ends = state.agent_positions[:, None, :] + start_offset * max_range
+    
+    # Raycast proti zdím [N, R, W] -> min per ray [N, R]
+    # (Implementace závisí na Brax nebo vlastní vektorized raycast)
+    distances = _batch_raycast_walls(starts, ends, state.wall_segments)
+    
+    # Raycast proti jiným agentům
+    agent_hits = _batch_raycast_agents(starts, ends, state.agent_positions, state.agent_radii)
+    
+    # Kombinace (vezmi bližší zásah)
+    final_distances = jnp.minimum(distances, agent_hits)
+    
+    return final_distances / max_range  # Normalizace
+```
+
+================================================================================
+5. BRAX ALTERNATIVA
+================================================================================
+
+Pokud nechceš psát fyziku od nuly, použij BRAX:
+
+```python
+from brax import envs
+from brax.io import mjcf
+
+# Definuj MJCF (MuJoCo XML) pro agenta
+AGENT_MJCF = """
+<mujoco>
+  <worldbody>
+    <body name="agent" pos="0 0 0.1">
+      <joint name="x" type="slide" axis="1 0 0"/>
+      <joint name="y" type="slide" axis="0 1 0"/>
+      <joint name="theta" type="hinge" axis="0 0 1"/>
+      <geom name="body" type="cylinder" size="0.1 0.05" rgba="0 0 1 1"/>
+    </body>
+  </worldbody>
+  <actuator>
+    <motor name="left_wheel" joint="..."/>
+    <motor name="right_wheel" joint="..."/>
+  </actuator>
+</mujoco>
+"""
+
+# Brax automaticky vektorizuje a JIT kompiluje
+env = envs.create(env_name="custom", system=mjcf.load(AGENT_MJCF))
+
+# Rollout
+state = env.reset(rng=jax.random.PRNGKey(0))
+for _ in range(1000):
+    action = policy(state.obs)  # [N, action_dim]
+    state = env.step(state, action)  # JIT-compiled!
+```
+
+================================================================================
+6. BENCHMARK CÍLE
+================================================================================
+
+  POČET AGENTŮ    TARGET FPS (GPU)    TARGET FPS (CPU)
+  ──────────────────────────────────────────────────────
+       10            10,000               1,000
+      100             5,000                 200
+    1,000             1,000                  20
+   10,000               100                   2
+
+================================================================================
+7. CO PŘENÉST Z V2
+================================================================================
+
+  ✓ Collision types (AGENT, WALL, GOAL) - jako int enum
+  ✓ Differential drive model (left/right motor)
+  ✓ Lidar ray count (32)
+  
+  ✗ pymunk (nahradit JAX/Brax)
+  ✗ Agent jako třída (nahradit SoA)
+  ✗ Per-agent for loopy (nahradit jax.vmap)
+
+================================================================================
+                            KONEC PHYSICS
+           Pokračuj čtením 02_ECS_ENTITIES.txt pro datový model.
+================================================================================

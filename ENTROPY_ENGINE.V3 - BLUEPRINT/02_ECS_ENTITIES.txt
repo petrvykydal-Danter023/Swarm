@@ -1,0 +1,334 @@
+================================================================================
+                    02_ECS_ENTITIES.txt
+                    Entity-Component-System Design
+================================================================================
+
+================================================================================
+1. PROČ ECS?
+================================================================================
+
+V2 PROBLÉM:
+  - `class Agent` má VŠECHNO: physics, signals, sensors, inventory...
+  - Přidat novou schopnost (např. "Healing") = upravit celou třídu.
+  - Těžké rozšířit, těžké testovat.
+
+V3 ŘEŠENÍ - ECS:
+  - ENTITY = Jen ID (int).
+  - COMPONENT = Data (pozice, zdraví, zpráva...).
+  - SYSTEM = Logika (PhysicsSystem, CommunicationSystem...).
+
+VÝHODY:
+  - Chceš přidat "Health"? Přidej HealthComponent. Žádná změna Agent třídy.
+  - Chceš agenta bez komunikace? Nepřidávej CommunicationComponent.
+  - Data jsou v POLI -> vektorizace.
+
+================================================================================
+2. KOMPONENTY (Data Schemas)
+================================================================================
+
+```python
+from dataclasses import dataclass
+from jax import numpy as jnp
+from typing import Optional
+
+# === ZÁKLADNÍ KOMPONENTY ===
+
+@dataclass
+class TransformComponent:
+    """Pozice a orientace entity."""
+    position: jnp.ndarray  # [2] - x, y
+    angle: float           # radians
+    
+@dataclass
+class PhysicsComponent:
+    """Fyzikální vlastnosti pro pohyblivé entity."""
+    velocity: jnp.ndarray  # [2] - vx, vy
+    angular_velocity: float
+    mass: float = 1.0
+    radius: float = 10.0   # Collision radius
+    
+@dataclass
+class RenderComponent:
+    """Vizuální vlastnosti pro rendering."""
+    color: tuple = (0, 0, 255)  # RGB
+    shape: str = "circle"       # "circle", "rectangle", "sprite"
+    sprite_path: Optional[str] = None
+    
+# === AGENTNÍ KOMPONENTY ===
+
+@dataclass  
+class SensorComponent:
+    """Lidar senzory."""
+    lidar_rays: int = 32
+    lidar_range: float = 300.0
+    lidar_readings: jnp.ndarray = None  # [lidar_rays] - filled by SensorSystem
+    
+@dataclass
+class CommunicationComponent:
+    """Schopnost komunikovat."""
+    message: jnp.ndarray = None    # [MSG_DIM] - current outgoing message
+    context: jnp.ndarray = None    # [CTX_DIM] - decoded from others
+    vocabulary_size: int = 32
+    payload_dim: int = 4
+    
+@dataclass
+class InventoryComponent:
+    """Schopnost nést objekty."""
+    carrying: int = -1             # Entity ID of carried object (-1 = none)
+    max_carry_weight: float = 10.0
+    
+@dataclass
+class GoalComponent:
+    """Cíl přiřazený agentovi."""
+    target_position: jnp.ndarray = None  # [2]
+    target_radius: float = 15.0
+    reached: bool = False
+    
+@dataclass
+class BrainComponent:
+    """Odkaz na AI model."""
+    brain_id: str = "default_ppo"  # Klíč do BrainManager
+    observation_dim: int = 36
+    action_dim: int = 2
+    
+# === OBJEKTOVÉ KOMPONENTY ===
+
+@dataclass
+class PickupableComponent:
+    """Objekt, který lze zvednout."""
+    weight: float = 1.0
+    value: float = 1.0       # Pro skórování
+    carried_by: int = -1     # Agent ID or -1
+    
+@dataclass
+class ObstacleComponent:
+    """Statická překážka."""
+    destructible: bool = False
+    health: float = 100.0
+```
+
+================================================================================
+3. ENTITY REGISTRY
+================================================================================
+
+```python
+from dataclasses import dataclass, field
+from typing import Dict, Type, Any
+import jax.numpy as jnp
+
+@dataclass
+class EntityRegistry:
+    """
+    Centrální registr entit a jejich komponent.
+    Interně ukládá data jako Arrays pro vektorizaci.
+    """
+    
+    # ID management
+    next_entity_id: int = 0
+    active_entities: set = field(default_factory=set)
+    
+    # Component storage (Type -> {entity_id: component})
+    # Pro produkci: nahradit za SoA arrays!
+    components: Dict[Type, Dict[int, Any]] = field(default_factory=dict)
+    
+    def create_entity(self) -> int:
+        """Vytvoří novou entitu a vrátí její ID."""
+        entity_id = self.next_entity_id
+        self.next_entity_id += 1
+        self.active_entities.add(entity_id)
+        return entity_id
+    
+    def destroy_entity(self, entity_id: int):
+        """Zničí entitu a všechny její komponenty."""
+        if entity_id in self.active_entities:
+            self.active_entities.remove(entity_id)
+            for comp_storage in self.components.values():
+                comp_storage.pop(entity_id, None)
+    
+    def add_component(self, entity_id: int, component):
+        """Přidá komponentu k entitě."""
+        comp_type = type(component)
+        if comp_type not in self.components:
+            self.components[comp_type] = {}
+        self.components[comp_type][entity_id] = component
+    
+    def get_component(self, entity_id: int, comp_type: Type):
+        """Získá komponentu entity."""
+        return self.components.get(comp_type, {}).get(entity_id)
+    
+    def get_entities_with(self, *comp_types: Type) -> set:
+        """Vrátí ID entit, které mají VŠECHNY zadané komponenty."""
+        if not comp_types:
+            return self.active_entities.copy()
+        
+        sets = [set(self.components.get(t, {}).keys()) for t in comp_types]
+        return set.intersection(*sets) if sets else set()
+
+
+# === TOVÁRNÍ FUNKCE ===
+
+def create_agent(registry: EntityRegistry, position: tuple, brain_id: str = "default") -> int:
+    """Factory pro vytvoření kompletního agenta."""
+    eid = registry.create_entity()
+    
+    registry.add_component(eid, TransformComponent(
+        position=jnp.array(position),
+        angle=0.0
+    ))
+    registry.add_component(eid, PhysicsComponent(
+        velocity=jnp.zeros(2),
+        angular_velocity=0.0,
+        radius=10.0
+    ))
+    registry.add_component(eid, SensorComponent(lidar_rays=32))
+    registry.add_component(eid, CommunicationComponent(
+        message=jnp.zeros(36),
+        context=jnp.zeros(64)
+    ))
+    registry.add_component(eid, InventoryComponent())
+    registry.add_component(eid, BrainComponent(brain_id=brain_id))
+    registry.add_component(eid, RenderComponent(color=(0, 100, 255)))
+    
+    return eid
+
+def create_goal(registry: EntityRegistry, position: tuple, target_agent_id: int) -> int:
+    """Factory pro vytvoření cíle přiřazeného agentovi."""
+    eid = registry.create_entity()
+    
+    registry.add_component(eid, TransformComponent(
+        position=jnp.array(position),
+        angle=0.0
+    ))
+    registry.add_component(eid, GoalComponent(
+        target_position=jnp.array(position),
+        target_radius=15.0
+    ))
+    registry.add_component(eid, RenderComponent(color=(0, 255, 0), shape="circle"))
+    
+    # Link goal to agent
+    agent_goal = registry.get_component(target_agent_id, GoalComponent)
+    if agent_goal is None:
+        registry.add_component(target_agent_id, GoalComponent(
+            target_position=jnp.array(position),
+            target_radius=15.0
+        ))
+    
+    return eid
+
+def create_resource(registry: EntityRegistry, position: tuple, value: float = 1.0) -> int:
+    """Factory pro sběratelný objekt."""
+    eid = registry.create_entity()
+    
+    registry.add_component(eid, TransformComponent(
+        position=jnp.array(position),
+        angle=0.0
+    ))
+    registry.add_component(eid, PickupableComponent(value=value))
+    registry.add_component(eid, RenderComponent(color=(255, 215, 0), shape="circle"))
+    
+    return eid
+```
+
+================================================================================
+4. VEKTORIZOVANÁ VERZE (Produkční)
+================================================================================
+
+Pro maximální rychlost: místo Dict[int, Component] použij Arrays:
+
+```python
+@dataclass
+class VectorizedAgentData:
+    """
+    Všechna data agentů v jednom pytree.
+    Indexování: data.positions[agent_index]
+    """
+    # Flags
+    active: jnp.ndarray        # [MAX_AGENTS] bool
+    
+    # Transform
+    positions: jnp.ndarray     # [MAX_AGENTS, 2]
+    angles: jnp.ndarray        # [MAX_AGENTS]
+    
+    # Physics
+    velocities: jnp.ndarray    # [MAX_AGENTS, 2]
+    ang_velocities: jnp.ndarray # [MAX_AGENTS]
+    radii: jnp.ndarray         # [MAX_AGENTS]
+    
+    # Sensors
+    lidar_readings: jnp.ndarray # [MAX_AGENTS, 32]
+    
+    # Communication
+    messages: jnp.ndarray      # [MAX_AGENTS, 36]
+    contexts: jnp.ndarray      # [MAX_AGENTS, 64]
+    
+    # Goals
+    goal_positions: jnp.ndarray # [MAX_AGENTS, 2]
+    goal_reached: jnp.ndarray   # [MAX_AGENTS] bool
+
+
+def init_agent_data(max_agents: int = 1000) -> VectorizedAgentData:
+    """Předalokuj maximální počet agentů."""
+    return VectorizedAgentData(
+        active=jnp.zeros(max_agents, dtype=bool),
+        positions=jnp.zeros((max_agents, 2)),
+        angles=jnp.zeros(max_agents),
+        velocities=jnp.zeros((max_agents, 2)),
+        ang_velocities=jnp.zeros(max_agents),
+        radii=jnp.full(max_agents, 10.0),
+        lidar_readings=jnp.ones((max_agents, 32)),
+        messages=jnp.zeros((max_agents, 36)),
+        contexts=jnp.zeros((max_agents, 64)),
+        goal_positions=jnp.zeros((max_agents, 2)),
+        goal_reached=jnp.zeros(max_agents, dtype=bool)
+    )
+```
+
+================================================================================
+5. SYSTÉMY (Logika)
+================================================================================
+
+Systémy operují nad komponentami:
+
+```python
+class System:
+    """Abstraktní báze pro ECS systémy."""
+    def update(self, registry: EntityRegistry, dt: float):
+        raise NotImplementedError
+
+class PhysicsSystem(System):
+    """Aktualizuje pozice na základě rychlostí."""
+    def update(self, registry, dt):
+        entities = registry.get_entities_with(TransformComponent, PhysicsComponent)
+        for eid in entities:
+            transform = registry.get_component(eid, TransformComponent)
+            physics = registry.get_component(eid, PhysicsComponent)
+            
+            # Update (v produkci: vektorizovat!)
+            transform.position += physics.velocity * dt
+            transform.angle += physics.angular_velocity * dt
+
+class SensorSystem(System):
+    """Počítá lidar readings pro všechny agenty."""
+    def update(self, registry, dt):
+        # Sbírá všechny pozice pro raycast
+        # Volá vektorizovaný compute_lidars()
+        pass
+
+class CommunicationSystem(System):
+    """Zpracovává příjem a odesílání zpráv."""
+    def update(self, registry, dt):
+        # 1. Sbírej všechny messages
+        # 2. Pro každého agenta: decode ostatních zprávy -> context
+        pass
+
+class RewardSystem(System):
+    """Počítá odměny pro RL."""
+    def update(self, registry, dt):
+        # Goal distance, collision penalties, comm bonuses...
+        pass
+```
+
+================================================================================
+                            KONEC ECS
+           Pokračuj čtením 03_COMMUNICATION.txt pro komunikační systém.
+================================================================================

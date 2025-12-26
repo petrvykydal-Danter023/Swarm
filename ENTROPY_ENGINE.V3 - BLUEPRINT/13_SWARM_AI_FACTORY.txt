@@ -1,0 +1,907 @@
+================================================================================
+                    13_SWARM_AI_FACTORY.txt
+                    "Výrobní Linka na Inteligenci" (Assembly Line)
+================================================================================
+
+================================================================================
+1. FILOSOFIE: AUTOMATIZOVANÁ TOVÁRNA
+================================================================================
+
+V3 AI Factory není jen skript pro trénink, je to ORCHESTRÁTOR.
+Místo trénování všeho najednou (End-to-End RL) rozdělujeme učení na logické bloky
+(stanice), které na sebe navazují.
+
+KLÍČOVÉ VÝHODY:
+- Rychlost: Vyřazení špatných modelů po 5 minutách (Stanice 1), ne po 10 hodinách.
+- Stabilita: Každá stanice má "Frozen Experts" - nové dovednosti neničí ty staré.
+- QA Gates: Každá stanice má přísná kritéria (Pass/Fail) pro postup.
+- Rodokmen: Každý model má dohledatelnou historii (Lineage).
+
+================================================================================
+2. STATIONS (Zastávky Linky)
+================================================================================
+
+📍 STATION 0: THE ORACLE FACTORY (Offline Data Generation) 🔮
+-------------------------------------------------------------
+CÍL: Vygenerovat masivní dataset perfektních trajektorií BEZ zapojení AI.
+VSTUP: Náhodně generované mapy/scénáře.
+METODA: Oracle-Guided Learning / Expert Distillation.
+VÝSTUP: 100,000+ demonstračních záznamů (State, Action) párů.
+ČAS: Běží 24/7 na pozadí, nezávisle na tréninku.
+
+ARCHITEKTURA ORACLE:
+```
+┌───────────────────────────────────────────────────────────────────┐
+│                     THE ORACLE (Vševědoucí Expert)                │
+├───────────────────────────────────────────────────────────────────┤
+│  PRIVILEGED INFO:                                                 │
+│    - Vidí skrz zdi (plná mapa)                                    │
+│    - Zná přesnou polohu cíle                                      │
+│    - Zná budoucí pohyb nepřátel (predikce)                        │
+│    - Globální znalost všech agentů                                │
+├───────────────────────────────────────────────────────────────────┤
+│  ALGORITMY:                                                       │
+│    - A* (pathfinding pro navigaci)                                │
+│    - RRT* (plánování pohybu v dynamickém prostředí)               │
+│    - Formation Planner (geometrické formace)                      │
+│    - Cooperative Scheduler (kdo kam jde)                          │
+├───────────────────────────────────────────────────────────────────┤
+│  VÝSTUP:                                                          │
+│    - Perfektní akce (motor commands)                              │
+│    - Perfektní komunikace (ground truth tokeny)                   │
+│    - Metadata (proč tato akce)                                    │
+└───────────────────────────────────────────────────────────────────┘
+```
+
+PROČ ORACLE A NE ČLOVĚK (Teleoperation)?
+  - Škálovatelnost: Oracle generuje data 24/7, člověk vydrží 10 minut.
+  - Přesnost: Oracle neudělá překlik ani jitter.
+  - Konzistence: 100,000 perfektních průchodů bez únavy.
+  - Reprodukovatelnost: Deterministické, lze opakovat.
+
+IMPLEMENTACE:
+```python
+class OracleFactory:
+    """
+    Offline generátor demonstračních dat.
+    Běží PŘED spuštěním AI tréninku.
+    """
+    def __init__(self, config):
+        self.scenario_generator = ScenarioGenerator(config)
+        self.oracle = PrivilegedOracle(config)
+        self.demo_buffer = DemonstrationBuffer(capacity=500_000)
+        
+    def generate_demos(self, num_episodes=100_000, maps_per_episode=1):
+        """Generuj N epizod demonstračních dat."""
+        for episode in tqdm(range(num_episodes)):
+            # 1. Vygeneruj náhodný scénář
+            scenario = self.scenario_generator.generate(
+                map_type=random.choice(["maze", "open", "rooms"]),
+                num_agents=random.randint(2, 10),
+                difficulty=random.uniform(0.3, 1.0)
+            )
+            
+            # 2. Spusť Oracle (BEZ AI)
+            state = self.env.reset(scenario)
+            trajectory = []
+            
+            while not state.done:
+                # Oracle vidí PLNÝ STATE (privileged)
+                oracle_action = self.oracle.act(state.full_state)
+                
+                # Ulož pár (observation, action)
+                # KLÍČ: Observation je to, co by viděla AI (partial)
+                trajectory.append(OracleDemo(
+                    observation=state.get_agent_observation(),  # Lidar, etc.
+                    action=oracle_action,
+                    metadata={
+                        "goal_visible": state.is_goal_visible(),
+                        "path_length": self.oracle.current_path_length,
+                        "scenario_difficulty": scenario.difficulty
+                    }
+                ))
+                
+                state = self.env.step(oracle_action)
+            
+            # 3. Ulož pouze úspěšné trajektorie
+            if state.goal_reached:
+                self.demo_buffer.add_trajectory(trajectory)
+                
+        # 4. Export pro Factory
+        self.demo_buffer.save("oracle_demos.pkl")
+        return self.demo_buffer.stats()
+
+
+class PrivilegedOracle(ExpertPolicy):
+    """
+    Vševědoucí expert pro generování demonstrací.
+    Kombinuje více specializovaných plánovačů.
+    """
+    def __init__(self, config):
+        self.navigator = AStarNavigator(resolution=config.astar_resolution)
+        self.formation = FormationPlanner()
+        self.communicator = RuleBasedCommunication()
+        
+    def act(self, full_state: WorldState) -> OracleAction:
+        """Vrátí perfektní akci na základě plného stavu."""
+        
+        # Motor commands (kam jet)
+        motor_action = self.navigator.compute_path(
+            start=full_state.agent_positions,
+            goals=full_state.goal_positions,
+            obstacles=full_state.all_obstacles  # Vidí i za rohem!
+        )
+        
+        # Communication (co říct)
+        comm_action = self.communicator.get_ground_truth_message(
+            full_state, 
+            agent_roles=full_state.roles
+        )
+        
+        return OracleAction(motor=motor_action, comm=comm_action)
+```
+
+INTEGRACE DO FACTORY:
+  - Oracle demos se načtou jako "warm-start" pro Station 1 a 2.
+  - Behavioral Cloning (Supervised) před RL drasticky zrychlí konvergenci.
+  - AI začíná s "intuicí" Oracla, ne jako Tabula Rasa.
+
+```python
+# V FactoryManager - před spuštěním Station 1:
+def load_oracle_warmstart(self, path="oracle_demos.pkl"):
+    """Načti pre-generované Oracle demonstrace."""
+    demos = DemonstrationBuffer.load(path)
+    print(f"📦 Loaded {len(demos)} Oracle demonstrations")
+    
+    # Pre-train pomocí Behavioral Cloning
+    self.pretrain_bc(demos, epochs=5)
+    print("🎓 Behavioral Cloning warm-start complete")
+```
+
+HARD STATES GENERATION (Cílené pokrytí obtížných situací):
+  Klasický Oracle generuje náhodně → může chybět kritické edge cases.
+  Řešení: Aktivně generuj demos pro "hard states":
+  
+  ```python
+  class HardStatesGenerator:
+      """Cíleně generuje obtížné situace pro lepší coverage."""
+      
+      HARD_SCENARIO_TYPES = [
+          "narrow_passage",     # Úzký průchod (1 agent šířka)
+          "dead_end_escape",    # Slepá ulička, nutný backtrack
+          "multi_agent_cross",  # Křížení trajektorií více agentů
+          "dynamic_obstacle",   # Pohybující se překážka
+          "goal_behind_wall",   # Cíl viditelný, ale nepřímá cesta
+          "formation_squeeze",  # Formace musí projet úzkým místem
+      ]
+      
+      def generate_hard_states(self, num_per_type=5000):
+          """Generuj cíleně těžké situace."""
+          for scenario_type in self.HARD_SCENARIO_TYPES:
+              for _ in range(num_per_type):
+                  scenario = self._create_scenario(scenario_type)
+                  yield scenario
+                  
+      def harvest_failure_states(self, student_rollouts):
+          """
+          Sbírej stavy kde student selhal → regeneruj Oracle demos.
+          Tohle řeší covariate shift!
+          """
+          failure_states = [
+              rollout.state for rollout in student_rollouts 
+              if rollout.collision or not rollout.goal_reached
+          ]
+          return self._relabel_with_oracle(failure_states)
+  ```
+
+COVERAGE-AWARE BC (Stabilnější RL Finetuning):
+  Klasické BC trénuje na jedinou "správnou" akci → úzká distribuce.
+  RL pak špatně fine-tunuje, protože policy nemá z čeho "hýbat".
+  
+  Řešení: Stochastická policy s entropy regularizací:
+  
+  ```python
+  def coverage_aware_bc_loss(policy, demos, entropy_coef=0.01):
+      """
+      BC loss s entropy regularizací pro širší coverage.
+      """
+      # Standardní BC loss
+      pred_actions = policy(demos.observations)
+      bc_loss = mse_loss(pred_actions, demos.expert_actions)
+      
+      # Entropy bonus - udržuj policy širokou
+      entropy = -jnp.sum(policy.log_prob(pred_actions))
+      
+      # Label smoothing - nepřefituj na jediné řešení
+      smoothed_targets = (
+          0.9 * demos.expert_actions + 
+          0.1 * jax.random.normal(key, demos.expert_actions.shape) * 0.1
+      )
+      smooth_loss = mse_loss(pred_actions, smoothed_targets)
+      
+      return bc_loss + 0.5 * smooth_loss - entropy_coef * entropy
+  ```
+
+KONFIGURACE:
+```yaml
+# configs/factory/oracle.yaml
+
+oracle_factory:
+  enabled: true
+  
+  generation:
+    num_episodes: 100_000
+    maps_per_difficulty:
+      easy: 30_000
+      medium: 50_000
+      hard: 20_000
+    
+  # === NOVÉ: Hard States ===
+  hard_states:
+    enabled: true
+    scenarios_per_type: 5000
+    types: ["narrow_passage", "dead_end", "multi_cross", "dynamic_obs"]
+    harvest_failures: true  # Sbírej failure states ze studentů
+    
+  oracle:
+    navigator:
+      algorithm: "astar"
+      resolution: 10
+      allow_diagonal: true
+    formation:
+      enabled: true
+      types: ["line", "v", "circle"]
+    communication:
+      inject_ground_truth: true
+      
+  # === NOVÉ: Streamovatelný formát ===
+  storage:
+    path: "data/oracle_demos/"
+    format: "tfrecord"     # Streamovatelné, ne pickle!
+    shard_size: 10_000     # Demos per shard
+    compression: "gzip"    # Menší velikost
+    memory_map: true       # Rychlé načítání
+    
+  # === NOVÉ: Coverage-aware BC ===
+  warmstart:
+    enabled: true
+    bc_epochs: 5
+    bc_learning_rate: 1e-3
+    entropy_coef: 0.01     # Entropy regularizace
+    label_smoothing: 0.1   # Širší distribuce
+```
+
+VÝHODY ORACLE PŘÍSTUPU:
+  ✅ Zero-Shot Performance: AI není tupá na začátku RL.
+  ✅ Řešení explorace: Oracle ukáže jak se dostat do vzácných stavů.
+  ✅ Konzistentní data: Žádný lidský jitter/chyby.
+  ✅ Parallel generation: Může běžet na CPU zatímco GPU trénuje.
+  ✅ Hard States: Cílené pokrytí edge cases.
+  ✅ Coverage-aware: Širší policy pro lepší RL finetuning.
+
+OMEZENÍ:
+  ⚠️ Oracle neřeší real-time reakce (to přijde v RL fázi).
+  ⚠️ Oracle neví o ostatních AI agentech (kooperace až Station 4).
+  ⚠️ Oracle je pomalý (1 FPS), AI musí být rychlá (60 FPS).
+
+-------------------------------------------------------------------------------
+
+📍 STATION 1: THE KINDERGARTEN (Základní slovník)
+-----------------------------------------------
+CÍL: Naučit agenta význam slov (Grounding) bez nutnosti pohybu.
+VSTUP: Tabula Rasa model.
+METODA: Supervised Learning (Hand of God Injection).
+ÚKOL: "Co vidíš?" (Agent stojí, dostává náhodné sensory -> musí vybrat správný token).
+QA GATE: 99% přesnost v pojmenování známých objektů.
+ČAS: ~5-10 min (RTX 3060).
+
+PRIORITIZED SAMPLING (Rychlejší konvergence):
+  Místo uniformního samplování demos převažuj vzorky s vysokou chybou:
+  
+  ```python
+  class PrioritizedDemoSampler:
+      def sample(self, demos, model, batch_size=256):
+          # Spočítej chyby pro všechny demos
+          predictions = model(demos.observations)
+          errors = jnp.abs(predictions - demos.targets)
+          
+          # Priority = chyba ^ alpha (alpha ~ 0.6)
+          priorities = errors ** 0.6
+          probs = priorities / priorities.sum()
+          
+          # Sample podle priorit
+          indices = jax.random.choice(key, len(demos), p=probs, shape=(batch_size,))
+          return demos[indices]
+  ```
+  
+  Výhoda: 2-3x rychlejší konvergence bez změny modelu.
+
+-------------------------------------------------------------------------------
+
+📍 STATION 2: THE GYM (Hrubá motorika)
+--------------------------------------
+CÍL: Perfektní pohyb a navigace k cíli bez nárazů.
+VSTUP: Model ze Stanice 1 (nebo Tabula Rasa).
+METODA: Iterativní DAgger (ne jednorázové BC!).
+ÚKOL: "Dostaň se k cíli v bludišti." (Komunikace je vypnutá).
+QA GATE: 95% úspěšnost na OUT-OF-DISTRIBUTION mapách.
+ČAS: ~15-30 min.
+
+ITERATIVNÍ DAgger LOOP (Řešení Compounding Errors):
+  Problém s klasickým BC: Student udělá malou chybu → ocitne se v novém stavu
+  → Expert nikdy neukazoval co dělat v tomto stavu → větší chyba → spirála smrti.
+  
+  DAgger (Dataset Aggregation) tohle řeší iterativním sběrem dat:
+  
+  ```
+  ┌────────────────────────────────────────────────────────────────┐
+  │                    DAGGER ITERATIVE LOOP                       │
+  ├────────────────────────────────────────────────────────────────┤
+  │  Round 0: BC warmstart z Oracle demos (Station 0)             │
+  │           ↓                                                    │
+  │  Round k: 1. Rollout(student) na nových mapách                │
+  │           2. Expert labelu CO BY UDĚLAL v těchto stavech      │
+  │           3. Append (student_states, expert_actions) do D     │
+  │           4. Retrain na D ∪ D_original                         │
+  │           5. Opakuj dokud OOD_success_rate nezůstane stabilní │
+  └────────────────────────────────────────────────────────────────┘
+  ```
+  
+  ```python
+  class DAggerTrainer:
+      def train(self, model, oracle, initial_demos, max_rounds=5):
+          dataset = initial_demos.copy()
+          
+          for round_k in range(max_rounds):
+              print(f"🔄 DAgger Round {round_k}")
+              
+              # 1. Student rollout (sbírej stavy které navštíví)
+              student_states = []
+              for episode in range(100):
+                  state = env.reset(random_map())
+                  while not state.done:
+                      action = model.act(state.observation)  # Student řídí!
+                      student_states.append(state.observation)
+                      state = env.step(action)
+              
+              # 2. Expert labeluje tyto stavy
+              expert_labels = [oracle.act(s) for s in student_states]
+              
+              # 3. Append do datasetu
+              dataset.add(student_states, expert_labels)
+              
+              # 4. Retrain
+              model.fit(dataset, epochs=3)
+              
+              # 5. Evaluace na OOD mapách
+              ood_success = evaluate_ood(model)
+              if ood_success > 0.95:
+                  print(f"✅ DAgger converged at round {round_k}")
+                  break
+                  
+          return model
+  ```
+  
+  KLÍČ: Expert labeluje stavy KDE BYL STUDENT, ne stavy z Oracle trajektorií.
+  Tohle eliminuje covariate shift / compounding errors.
+
+📍 STATION 3: THE LANGUAGE SCHOOL (Multimodální fúze)
+-----------------------------------------------------
+CÍL: Spojení akce a slova (Konzistence).
+VSTUP: Frozen Encoders ze S1 (Comm) a S2 (Motor).
+METODA: Trainable Fusion Layer.
+ÚKOL: "Říkej co děláš." (Pokud jde k jídlu, MUSÍ vysílat token FOOD).
+QA GATE: Konzistence mezi vysílaným tokenem a směrem pohybu > 90%.
+ČAS: ~30 min.
+
+📍 STATION 4: THE TEAM BUILDING (Kooperace)
+-------------------------------------------
+CÍL: Emergentní kooperace a swarm dynamika.
+VSTUP: Model ze Stanice 3.
+METODA: Multi-Agent PPO (MAPPO) s asistencí (Hand of God).
+ÚKOL: "Tlačte těžký objekt společně", "Uvolni cestu", "Braň cíl".
+QA GATE: Splnění kooperativního scénáře (Reward Threshold).
+ČAS: ~1-3 hodiny.
+
+MAPPO OPTIMALIZACE (Actor/Critic Split):
+  Bottleneck v MAPPO je často critic (má globální vstup všech agentů).
+  Řešení: Asymetrický update budget:
+  
+  ```python
+  class OptimizedMAPPO:
+      def __init__(self, config):
+          self.actor_updates_per_step = 4   # Actor častěji
+          self.critic_updates_per_step = 1  # Critic méně často
+          
+      def update(self, rollout_buffer):
+          # Critic update (1x za step, menší síť)
+          critic_loss = self.update_critic(rollout_buffer)
+          
+          # Actor update (4x za step, rychlejší)
+          for _ in range(self.actor_updates_per_step):
+              actor_loss = self.update_actor(rollout_buffer)
+              
+          return actor_loss, critic_loss
+  ```
+  
+  Výhoda: Lepší FPS tréninku + stabilnější credit assignment.
+  
+  KONFIGURACE:
+  ```yaml
+  mappo:
+    actor:
+      lr: 3e-4
+      updates_per_step: 4
+      hidden_dims: [256, 256]
+    critic:
+      lr: 1e-3
+      updates_per_step: 1
+      hidden_dims: [512, 256]  # Větší, ale méně updatů
+      global_state: true       # Vidí všechny agenty
+  ```
+
+📍 STATION 5: THE WAR ROOM (Stress Test / QA)
+---------------------------------------------
+CÍL: Robustnost a certifikace Master Modelu.
+VSTUP: Model ze Stanice 4.
+METODA: "Chaos Monkey" (Adversarial Training).
+ÚKOL: Senzorické výpadky, změna fyzikálních konstant, nepřátelští agenti.
+QA GATE: Přežití v 95% stresových scénářů.
+ČAS: ~30-60 min.
+
+-------------------------------------------------------------------------------
+
+📍 STATION 5.5: DOMAIN RANDOMIZATION CERTIFICATION 🎲
+------------------------------------------------------
+CÍL: Sim-to-Real robustnost přes systematickou randomizaci.
+VSTUP: Model ze Stanice 5.
+METODA: Domain Randomization (DR) + Generalization Gap analýza.
+ÚKOL: Udržet výkon napříč rodinou MDP s různými parametry.
+QA GATE: Generalization Gap < 10%.
+VÝSTUP: "Certified Master Model v1.0" (Real-World Ready).
+
+CO JE DOMAIN RANDOMIZATION?
+  Místo ladění simulátoru na přesné fyzikální konstanty (těžké, křehké)
+  trénujeme na ROZSAHU parametrů. Model pak generalizuje na "reálné" hodnoty.
+  
+  Příklad: Místo friction=0.5 trénujeme na friction ∈ [0.3, 0.8].
+  Model pak zvládne i friction=0.55 v reálném světě.
+
+RANDOMIZOVANÉ PARAMETRY:
+```python
+@dataclass
+class DomainRandomizationConfig:
+    """Rozsahy pro randomizaci sim-to-real."""
+    
+    # === Fyzika ===
+    friction_range: Tuple[float, float] = (0.3, 1.5)
+    motor_power_variance: float = 0.20      # ±20%
+    wheel_slip_range: Tuple[float, float] = (0.0, 0.15)
+    agent_mass_variance: float = 0.15       # ±15%
+    
+    # === Senzory ===
+    lidar_dropout_prob: float = 0.10        # 10% chybějících paprsků
+    lidar_noise_stddev: float = 0.05        # Gaussovský šum
+    camera_blur_prob: float = 0.05          # Motion blur
+    sensor_delay_ms: Tuple[int, int] = (0, 30)  # Zpoždění
+    
+    # === Komunikace ===
+    comm_delay_ms: Tuple[int, int] = (0, 50)    # Latence zpráv
+    comm_dropout_prob: float = 0.05             # Ztracené zprávy
+    comm_noise_stddev: float = 0.02             # Šum v payloadu
+    
+    # === Prostředí ===
+    lighting_variance: float = 0.3          # Pro vision modely
+    texture_randomization: bool = True      # Náhodné textury
+```
+
+IMPLEMENTACE:
+```python
+class DomainRandomizer:
+    def __init__(self, config: DomainRandomizationConfig):
+        self.config = config
+        
+    def randomize_physics(self, env, rng):
+        """Náhodně nastaví fyzikální parametry."""
+        env.friction = jax.random.uniform(
+            rng, minval=self.config.friction_range[0],
+            maxval=self.config.friction_range[1]
+        )
+        env.motor_power *= 1.0 + jax.random.uniform(
+            rng, minval=-self.config.motor_power_variance,
+            maxval=self.config.motor_power_variance
+        )
+        
+    def randomize_sensors(self, observation, rng):
+        """Přidej šum a dropout do senzorů."""
+        # Lidar dropout
+        dropout_mask = jax.random.bernoulli(
+            rng, 1 - self.config.lidar_dropout_prob,
+            shape=observation.lidar.shape
+        )
+        observation.lidar *= dropout_mask
+        
+        # Gaussovský šum
+        noise = jax.random.normal(rng, observation.lidar.shape)
+        observation.lidar += noise * self.config.lidar_noise_stddev
+        
+        return observation
+```
+
+GENERALIZATION GAP METRIKA:
+  Měříme rozdíl výkonu mezi "čistou" a "randomizovanou" simulací:
+  
+  ```python
+  def compute_generalization_gap(model):
+      # Výkon na čisté simulaci (default params)
+      clean_success = evaluate(model, randomize=False)
+      
+      # Výkon na randomizované simulaci
+      dr_success = evaluate(model, randomize=True)
+      
+      # Gap by měl být < 10%
+      gap = abs(clean_success - dr_success)
+      return gap
+  ```
+  
+  QA GATE: `generalization_gap < 0.10`
+  
+  Pokud gap > 10%, model je příliš "overfit" na čistou simulaci
+  a nepřežije v reálném světě.
+
+KONFIGURACE:
+```yaml
+# configs/factory/domain_randomization.yaml
+
+domain_randomization:
+  enabled: true
+  
+  physics:
+    friction: [0.3, 1.5]
+    motor_power_variance: 0.20
+    wheel_slip: [0.0, 0.15]
+    mass_variance: 0.15
+    
+  sensors:
+    lidar_dropout: 0.10
+    lidar_noise: 0.05
+    delay_ms: [0, 30]
+    
+  communication:
+    delay_ms: [0, 50]
+    dropout: 0.05
+    
+  qa_gate:
+    max_generalization_gap: 0.10
+    min_dr_success_rate: 0.85
+```
+
+VÝSTUP: "Certified Master Model v1.0" (Real-World Ready).
+
+================================================================================
+2.6 ADAPTIVE SKEPTICISM DIAL (Dynamický Skepticismus) 🎚️
+================================================================================
+
+Napříč linkou graduelně roste "error_rate" experta (viz 11_HAND_OF_GOD.txt).
+To vytváří "Ovladač Skepse" - AI se učí nezávislému rozhodování.
+
+PROBLÉM S FIXNÍM error_rate:
+  Fixní hodnoty (2%, 5%, 10%) ignorují aktuální stav učení.
+  → Příliš brzy = rozbitý model (AI se nezvládá učit základy)
+  → Příliš pozdě = pomalé učení skepticismu
+
+ŘEŠENÍ: ADAPTIVNÍ SKEPTICISM DIAL
+  error_rate se dynamicky mění podle performance metrik:
+  
+  ```python
+  class AdaptiveSkepticismDial:
+      """
+      Dynamicky upravuje error_rate podle výkonu AI.
+      """
+      def __init__(self, config):
+          self.error_rate = 0.0
+          self.min_rate = 0.0
+          self.max_rate = 0.20
+          self.adjust_interval = 1000  # steps
+          
+          # Thresholds pro úpravu
+          self.success_threshold = 0.95
+          self.collision_threshold = 0.02
+          self.crisis_threshold = 0.70
+          
+      def update(self, metrics):
+          """
+          Uprav error_rate podle aktuálního výkonu.
+          
+          Args:
+              metrics: {success_rate, collision_rate, goal_reached_rate}
+          """
+          # AI je stabilní a úspěšná → zvyš error_rate (více skepticismu)
+          if (metrics.success_rate > self.success_threshold and 
+              metrics.collision_rate < self.collision_threshold):
+              self.error_rate = min(
+                  self.error_rate + 0.01, 
+                  self.max_rate
+              )
+              print(f"📈 AI stable, increasing skepticism to {self.error_rate:.1%}")
+              
+          # AI se rozpadá → NOUZOVÝ BRAKEDOWN
+          elif metrics.success_rate < self.crisis_threshold:
+              self.error_rate = max(
+                  self.error_rate - 0.02,
+                  self.min_rate
+              )
+              print(f"🚨 AI struggling, reducing skepticism to {self.error_rate:.1%}")
+              
+          return self.error_rate
+          
+      def get_error_rate(self):
+          return self.error_rate
+  ```
+
+INTEGRACE DO FACTORY:
+  ```python
+  # V training loop:
+  skepticism_dial = AdaptiveSkepticismDial(config)
+  
+  for step in range(max_steps):
+      # Periodicky aktualizuj error_rate
+      if step % skepticism_dial.adjust_interval == 0:
+          metrics = compute_rolling_metrics(last_1000_episodes)
+          current_error_rate = skepticism_dial.update(metrics)
+          expert.set_error_rate(current_error_rate)
+  ```
+
+Z FIXNÍHO NA ADAPTIVNÍ (Doporučená migrace):
+
+📍 STANICE 1-2: Naivní Důvěra
+  error_rate = 0% (FIXNÍ, expert musí být perfektní)
+  Důvod: Na začátku AI nic neumí, potřebuje čisté vzory.
+
+📍 STANICE 3: Začíná Pochybnost
+  error_rate = ADAPTIVNÍ, start 0%, max 5%
+  Zvyšuj jen když success_rate > 90%
+  AI: Musí se naučit verifikovat - vizuální vstup (Lidar) > Command input.
+
+📍 STANICE 4: Rostoucí Skepse
+  error_rate = ADAPTIVNÍ, start 2%, max 10%
+  Emergency brake pod 70% success_rate
+  AI: "Beru příkaz jako návrh, ne příkaz."
+  
+📍 STANICE 5-5.5: Maximální Skepticismus
+  error_rate = ADAPTIVNÍ, start 5%, max 20%
+  Expert je "opilý nebo nepřátelský".
+  Bonus: "Insubordination Reward" - pokud ignoruje špatnou radu A splní cíl → +5.0
+
+KONFIGURACE:
+```yaml
+# configs/factory/skepticism.yaml
+
+adaptive_skepticism:
+  enabled: true
+  
+  per_station:
+    station_1_2:
+      mode: "fixed"
+      error_rate: 0.0
+    station_3:
+      mode: "adaptive"
+      start_rate: 0.0
+      max_rate: 0.05
+      success_threshold: 0.90
+    station_4:
+      mode: "adaptive"
+      start_rate: 0.02
+      max_rate: 0.10
+      crisis_threshold: 0.70
+    station_5:
+      mode: "adaptive"
+      start_rate: 0.05
+      max_rate: 0.20
+      
+  adjust_interval: 1000
+  increase_step: 0.01
+  decrease_step: 0.02  # Rychlejší snížení při krizi
+```
+
+VÝSLEDEK:
+  Robot, který zastaví na propasti místo slepého následování GPS.
+  "GPS říká doprava, kamery vidí zeď → IGNORUJ GPS."
+  
+  BONUS: Adaptivní systém se sám reguluje - nezničí model příliš
+  agresivním lživým expertem v nevhodnou chvíli.
+
+================================================================================
+3. FACTORY MANAGER (Technická realizace)
+================================================================================
+
+ARCHITEKTURA: ODDĚLENÍ CORE A FACTORY
+  Factory je nadstavba (Build System), která používá Engine (Runtime) jako knihovnu.
+  Důvod: Čistota produkčního kódu, oddělení závislostí.
+
+  ```text
+  ENTROPY_ENGINE.V3/
+  ├── entropy/                  # CORE ENGINE (Runtime library) - "AUTO"
+  │   ├── core/                 # Physics, ECS, World
+  │   ├── env/                  # Runtime logika
+  │   └── brain/                # Inference-only logika (pro hru)
+  │
+  ├── factory/                  # SWARM FACTORY (Orchestrator) - "TOVÁRNA"
+  │   ├── manager.py            # FactoryManager (řídí linku)
+  │   ├── stations/             # Logika jednotlivých stanic (Train Loops)
+  │   ├── oracle/               # Oracle logika (A*, HardStates generátor)
+  │   └── analysis/             # QA Gates, WandB reporting
+  │
+  └── configs/
+      ├── env/                  # Core configs
+      └── factory/              # Training pipelines
+  ```
+
+  Manager je orchestrátor, který řídí postup modelů linkou:
+
+```python
+class FactoryManager:
+    def __init__(self, config):
+        # Importuje ENV z entropy.core, ale logiku tréninku má v factory.*
+        from entropy.env import SwarmEnv
+        from factory.stations import Kindergarten, Gym, ...
+        
+        self.stations = [
+            Kindergarten(),
+            Gym(),
+            # ...
+        ]
+        self.registry = ModelRegistry()  # Sleduje hashe a rodokmeny
+            LanguageSchoolStation(),
+            TeamBuildingStation(),
+            WarRoomStation()
+        ]
+        self.registry = ModelRegistry()  # Sleduje hashe a rodokmeny
+        
+    def process_model(self, model_id):
+        current_checkpoint = self.registry.get_latest(model_id)
+        
+        for station in self.stations:
+            print(f"🏭 Factory: Entering {station.name}...")
+            
+            # 1. Warmup (Dry run)
+            if not station.warmup(current_checkpoint):
+                print(f"❌ Warmup failed at {station.name}. Aborting.")
+                return False
+                
+            # 2. Train with 3 retries
+            success = False
+            for attempt in range(3):
+                success, model = station.train(current_checkpoint)
+                if success: break
+                print(f"⚠️ Attempt {attempt+1} failed. Retrying...")
+            
+            if not success:
+                print(f"🛑 Station {station.name} FATAL FAIL. Discarding batch.")
+                return False
+                
+            # 3. Quality Gate
+            if not station.validate(model):
+                print(f"📉 QA Gate failed at {station.name}.")
+                return False
+                
+            # 4. Save & Proceed
+            current_checkpoint = self.registry.save(model, station.name)
+            
+        return True # Master Model Certified!
+```
+
+================================================================================
+4. MODULARITA A WEIGHT FUSION (Stanice 3)
+================================================================================
+
+Klíčem k rychlosti je NEUČIT se vše znovu. Na Stanici 3 používáme **Trainable Fusion Layer**:
+
+```python
+class Station3Net(nn.Module):
+    def __init__(self, s1_comm_weights, s2_motor_weights):
+        # 1. Načti experty a ZAMRAZ je (Frozen)
+        self.comm_expert = load_frozen(s1_comm_weights)
+        self.motor_expert = load_frozen(s2_motor_weights)
+        
+        # 2. Trénuj pouze Fúzi (jak se mají ovlivňovat)
+        self.fusion_head = nn.Sequential(
+            nn.Linear(64 + 64, 128), 
+            nn.ReLU(),
+            nn.Linear(128, final_action_dim)
+        )
+```
+
+================================================================================
+4.2 JAX IMPLEMENTACE SKEPTICISMU
+================================================================================
+
+Fallible Expert v JAXu je velmi efektivní - error_rate je jen maska:
+
+```python
+@jax.jit
+def skepticism_aware_loss(params, state, expert_action, is_expert_correct):
+    """
+    Loss funkce pro Skepticism Dial.
+    Učí AI verifikovat rady místo slepého následování.
+    """
+    # AI inference
+    ai_action = network.apply(params, state)
+    
+    # Imitation loss (vzdálenost AI vs Expert)
+    imitation_loss = jnp.sum((ai_action - expert_action) ** 2)
+    
+    # KLÍČOVÝ TRIK:
+    # Pokud expert lže (is_expert_correct=False), chceme MAXIMALIZOVAT rozdíl!
+    # → "Dělej opak toho, co říká lhář"
+    
+    # Váhování loss podle correctness:
+    # - Expert má pravdu (True) → minimalizuj rozdíl (učením)
+    # - Expert lže (False) → ignoruj loss (nebo ji otoč)
+    weighted_imitation = jnp.where(
+        is_expert_correct, 
+        imitation_loss,      # Učení od správného experta
+        0.0                  # Ignorování špatného experta
+    )
+    
+    # RL loss (dosažení cíle) funguje VŽDY
+    # → I když expert lže, AI se stále snaží o cíl
+    rl_loss = -jnp.sum(rewards)  # PPO objective
+    
+    return weighted_imitation + rl_loss
+```
+
+VÝHODA V JAX:
+  - `jnp.where()` je plně vektorizované
+  - Batch processing N agentů × M expertů najednou
+  - JIT kompilace eliminuje overhead
+
+================================================================================
+5. PIPELINE PARALLELISM
+================================================================================
+
+Na jedné GPU (RTX 3060) lze linku "naplnit" více modely v různých fázích:
+
+VRAM Slot 1: Model C (Station 1 - 5% VRAM)
+VRAM Slot 2: Model B (Station 2 - 15% VRAM)
+VRAM Slot 3: Model A (Station 4 - 60% VRAM)
+
+Factory Manager hlídá alokaci VRAM a spouští stanice tak, aby nedošlo k OOM (Out Of Memory).
+
+================================================================================
+6. KONFIGURACE (Hydra)
+================================================================================
+
+```yaml
+# configs/factory/master_line.yaml
+
+factory:
+  pipeline: [kindergarten, gym, language_school, team_building, war_room]
+  parallel_slots: 3
+  auto_retry: 3
+  
+stations:
+  kindergarten:
+    target_accuracy: 0.99
+    max_time: 10m
+  gym:
+    target_success_rate: 0.95
+    expert_type: "astar"
+  ...
+```
+
+================================================================================
+7. KDY TO ROZBÍT? (Line Interrupt)
+================================================================================
+
+Factory Manager automaticky zastaví linku, pokud:
+1. Loss exploduje (NaN/Inf).
+2. Accuracy stagnuje déle než 20% vyhrazeného času stanice.
+3. GPU teplota/power limit překročí bezpečnou mez.
+
+================================================================================
+                            KONEC FACTORY
+                            
+        Toto je poslední dokument Blueprint. Vše je připraveno!
+        Vrať se k 00_OVERVIEW.txt nebo začni implementaci!
+================================================================================

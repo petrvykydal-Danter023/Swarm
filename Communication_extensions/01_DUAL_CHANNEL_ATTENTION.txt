@@ -1,0 +1,127 @@
+================================================================================
+DUAL-CHANNEL ATTENTION - Implementation Plan
+================================================================================
+
+GOAL:
+Rozdělit Attention mechanismus na dvě větve (Local + Global), aby agent
+nepletl taktické a strategické informace.
+
+================================================================================
+1. CONFIGURATION CHANGES
+================================================================================
+
+File: entropy/config.py
+
+Add to CommConfig:
+    dual_attention: bool = False
+    local_radius: float = 100.0      # Distance threshold for "local" messages
+    local_heads: int = 2             # Attention heads for local channel
+    global_heads: int = 2            # Attention heads for global channel
+
+================================================================================
+2. NETWORK ARCHITECTURE CHANGES
+================================================================================
+
+File: entropy/training/mappo.py
+
+Current:
+    class RecurrentActor:
+        # Single MLP processes entire obs including flat inbox
+
+Proposed:
+    class DualChannelActor(nn.Module):
+        @nn.compact
+        def __call__(self, obs, inbox_msgs, inbox_meta, inbox_mask, carry):
+            
+            # 1. Split Inbox by Distance
+            distances = inbox_meta[..., 0]  # RelDist is first element
+            local_mask = (distances < self.local_radius) & inbox_mask
+            global_mask = (distances >= self.local_radius) & inbox_mask
+            
+            # 2. Local Attention (Tactical)
+            local_ctx = nn.MultiHeadDotProductAttention(
+                num_heads=self.local_heads,
+                qkv_features=64
+            )(query=obs, key_value=inbox_msgs, mask=local_mask)
+            
+            # 3. Global Attention (Strategic)
+            global_ctx = nn.MultiHeadDotProductAttention(
+                num_heads=self.global_heads,
+                qkv_features=64
+            )(query=obs, key_value=inbox_msgs, mask=global_mask)
+            
+            # 4. Concatenate Contexts
+            combined = jnp.concatenate([obs, local_ctx, global_ctx], axis=-1)
+            
+            # 5. GRU + Action Heads (same as before)
+            ...
+
+================================================================================
+3. OBSERVATION SPACE CHANGES
+================================================================================
+
+File: entropy/training/env_wrapper.py
+
+Current:
+    - Inbox is flattened into observation vector
+    
+Proposed:
+    - Keep inbox structured: return (core_obs, inbox_msgs, inbox_meta, inbox_mask)
+    - Or: Pass inbox_meta separately so network can split by distance
+
+Option A (Minimal Change):
+    - In network, slice obs back into components using known dimensions
+    
+Option B (Clean but Breaking):
+    - Change reset/step to return dict: {'obs': ..., 'inbox': ...}
+    - Update training loop to handle dict
+
+RECOMMENDATION: Option A for now (less refactoring).
+
+================================================================================
+4. TRAINING LOOP CHANGES
+================================================================================
+
+File: train_master.py
+
+Changes needed:
+    - Pass inbox components to actor.apply_fn() if using structured input
+    - OR: No changes if using flat obs with slicing inside network
+
+================================================================================
+5. VERIFICATION PLAN
+================================================================================
+
+Test 1: Shape Consistency
+    - Ensure local_ctx and global_ctx have correct shapes
+    - Ensure masks are applied correctly (no NaN from empty attention)
+
+Test 2: Behavioral Test
+    - Scenario: Agent near collision (local) while receiving global "go north"
+    - Expected: Agent avoids collision first, then follows global direction
+    - Compare with single-attention baseline
+
+Test 3: Ablation
+    - Train with dual_attention=True vs dual_attention=False
+    - Measure: Collision rate, goal reach rate, training stability
+
+================================================================================
+6. ESTIMATED EFFORT
+================================================================================
+
+- Config changes:        30 min
+- Network refactor:      2-3 hours (new module + slicing logic)
+- Env wrapper changes:   1 hour (if structured obs)
+- Testing:               1-2 hours
+
+TOTAL: ~5-6 hours
+
+================================================================================
+7. DEPENDENCIES
+================================================================================
+
+- Requires: Spatial Communication (DONE)
+- Requires: Inbox with metadata (DONE)
+- Optional: Attention visualization for debugging
+
+================================================================================

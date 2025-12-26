@@ -1,0 +1,17 @@
+factory:
+  pipeline: ["oracle", "kindergarten", "gym", "language_school", "team_building", "war_room"]
+  parallel_slots: 3
+  auto_retry: 3
+  
+stations:
+  oracle:
+    generation:
+      num_episodes: 1000  # Default for testing
+    storage:
+      path: "data/oracle_demos/"
+  kindergarten:
+    target_accuracy: 0.99
+    max_time: 10m
+  gym:
+    target_success_rate: 0.95
+    expert_type: "astar"

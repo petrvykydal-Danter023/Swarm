@@ -1,0 +1,17 @@
+
+"""
+Placeholder: I need to significantly refactor env_wrapper to support the new Spatial Inbox logic.
+This file is currently too small/simple for the complex logic required (spatial lookup, inbox buffer management).
+I will create a new helper file `entropy/core/comms_router.py` to handle the heavy lifting, 
+then call it from `env_wrapper.py`.
+
+Plan:
+1. Create `entropy/core/comms_router.py`:
+   - `route_messages(state, actions, config)` -> `next_state` (with updated inboxes)
+   - Logic: 
+     - Extract actions (Gate, Channel, Angle, Dist, Msg)
+     - Filter gated checks
+     - Calculate target points
+     - Compute distance matrix
+     - Route to inboxes (Direct / Broadcast)
+"""

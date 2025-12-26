@@ -1,0 +1,133 @@
+2025-12-25 21:03:23,606 | ProductionMain | INFO | 🏭 ENTROPY ENGINE V3: INITIALIZING SWARM AI FACTORY
+2025-12-25 21:03:23,606 | ProductionMain | INFO | 🚀 Mode: PRODUCTION TRAINING
+2025-12-25 21:03:23,611 | ProductionMain | INFO | 📜 Loaded Config: {'factory': {'pipeline': ['oracle', 'kindergarten', 'gym', 'language_school', 'team_building', 'war_room', 'domain_randomization'], 'auto_retry': 2}, 'stations': {'oracle': {'generation': {'num_episodes': 200, 'map_difficulty': 'medium'}, 'expert': {'type': 'privileged_astar'}, 'storage': {'path': 'data/short_prod_demos/'}}, 'kindergarten': {'max_epochs': 10, 'batch_size': 128, 'learning_rate': '3e-4', 'target_accuracy': 0.8, 'storage': {'path': 'data/short_prod_demos/'}}, 'gym': {'target_success_rate': 0.8, 'dagger': {'max_rounds': 3, 'episodes_per_round': 20, 'gradient_steps': 100, 'ood_threshold': 0.8}, 'storage': {'path': 'data/short_prod_demos/'}}, 'language_school': {'max_epochs': 10, 'target_consistency': 0.8, 'storage': {'path': 'data/short_prod_demos/'}}, 'team_building': {'max_epochs': 20, 'reward_threshold': 10.0, 'mappo': {'lr_actor': '3e-4', 'lr_critic': '1e-3', 'actor_updates_per_step': 4}, 'storage': {'path': 'data/short_prod_demos/'}}, 'war_room': {'epochs_per_scenario': 2, 'survival_threshold': 0.5, 'scenarios': ['sensor_dropout', 'physics_friction', 'adversarial_agents', 'communication_failure'], 'storage': {'path': 'data/short_prod_demos/'}}, 'domain_randomization': {'max_gap': 0.5, 'storage': {'path': 'data/short_prod_demos/'}}}}
+2025-12-25 21:03:23,611 | FactoryManager | INFO | Initializing Factory Stations...
+2025-12-25 21:03:23,612 | FactoryManager | INFO | Loaded 7 stations: ['OracleStation', 'KindergartenStation', 'GymStation', 'LanguageSchoolStation', 'TeamBuildingStation', 'WarRoomStation', 'DomainRandomizationStation']
+2025-12-25 21:03:23,614 | ProductionMain | INFO | ⏳ Starting Pipeline... This may take hours/days depending on compute.
+2025-12-25 21:03:24,379 | Dashboard | INFO | 🚀 Dashboard running at http://localhost:8080
+2025-12-25 21:03:24,379 | FactoryManager | INFO | 🏭 Entering Station: OracleStation
+2025-12-25 21:03:24,379 | OracleFactory | INFO | Initializing Oracle warmup...
+2025-12-25 21:03:24,381 | OracleFactory | INFO |   ✓ Oracle produces valid actions: motor=[3.75       1.57079633]
+2025-12-25 21:03:24,381 | OracleFactory | INFO | 🔮 Starting Oracle Generation for 200 episodes...
+2025-12-25 21:03:24,399 | OracleFactory | INFO |   Progress: 10% (20/200)
+2025-12-25 21:03:24,424 | OracleFactory | INFO |   Progress: 20% (40/200)
+2025-12-25 21:03:24,458 | OracleFactory | INFO |   Progress: 30% (60/200)
+2025-12-25 21:03:24,490 | OracleFactory | INFO |   Progress: 40% (80/200)
+2025-12-25 21:03:24,516 | OracleFactory | INFO |   Progress: 50% (100/200)
+2025-12-25 21:03:24,538 | OracleFactory | INFO |   Progress: 60% (120/200)
+2025-12-25 21:03:24,573 | OracleFactory | INFO |   Progress: 70% (140/200)
+2025-12-25 21:03:24,597 | OracleFactory | INFO |   Progress: 80% (160/200)
+2025-12-25 21:03:24,622 | OracleFactory | INFO |   Progress: 90% (180/200)
+2025-12-25 21:03:24,735 | OracleFactory | INFO | ✅ Generated 198 trajectories
+2025-12-25 21:03:24,752 | OracleFactory | INFO | Validating Oracle Dataset...
+2025-12-25 21:03:24,753 | OracleFactory | INFO |   Found 1 demo files
+2025-12-25 21:03:24,753 | FactoryManager | INFO | ✅ Station OracleStation passed. Proceeding.
+2025-12-25 21:03:24,753 | FactoryManager | INFO | 🏭 Entering Station: KindergartenStation
+2025-12-25 21:03:24,753 | Kindergarten | INFO | Kindergarten warmup: checking data availability...
+2025-12-25 21:03:24,842 | Kindergarten | INFO | 🎒 Starting Kindergarten training (Behavior Cloning)...
+2025-12-25 21:03:24,907 | Kindergarten | INFO |   Loaded 198 trajectories.
+2025-12-25 21:03:25,089 | jax._src.xla_bridge | INFO | Unable to initialize backend 'tpu': UNIMPLEMENTED: LoadPjrtPlugin is not implemented on windows yet.
+2025-12-25 21:03:25,221 | Kindergarten | INFO |   Processed 9900 samples.
+2025-12-25 21:03:41,574 | Kindergarten | INFO |   Epoch 1/10 | Loss: 9.1675
+2025-12-25 21:04:03,841 | Kindergarten | INFO |   Epoch 2/10 | Loss: 3.6045
+2025-12-25 21:04:13,871 | Kindergarten | INFO |   Epoch 3/10 | Loss: 1.2062
+2025-12-25 21:04:23,819 | Kindergarten | INFO |   Epoch 4/10 | Loss: 0.3776
+2025-12-25 21:04:33,992 | Kindergarten | INFO |   Epoch 5/10 | Loss: 0.1400
+2025-12-25 21:04:43,947 | Kindergarten | INFO |   Epoch 6/10 | Loss: 0.0859
+2025-12-25 21:04:54,025 | Kindergarten | INFO |   Epoch 7/10 | Loss: 0.0758
+2025-12-25 21:05:04,150 | Kindergarten | INFO |   Epoch 8/10 | Loss: 0.0726
+2025-12-25 21:05:14,167 | Kindergarten | INFO |   Epoch 9/10 | Loss: 0.0713
+2025-12-25 21:05:24,095 | Kindergarten | INFO |   Epoch 10/10 | Loss: 0.0702
+2025-12-25 21:05:24,095 | Kindergarten | INFO | 🎒 Training complete.
+2025-12-25 21:05:24,108 | Kindergarten | INFO | Validating Kindergarten model...
+2025-12-25 21:05:24,134 | Kindergarten | INFO |   Output shape check: (1, 2) -> PASS
+2025-12-25 21:05:24,134 | FactoryManager | INFO | ✅ Station KindergartenStation passed. Proceeding.
+2025-12-25 21:05:24,135 | FactoryManager | INFO | 🏭 Entering Station: GymStation
+2025-12-25 21:05:24,135 | Gym | INFO | Gym warmup: checking navigation environment...
+2025-12-25 21:05:24,135 | Gym | INFO | 🏋️ Starting Gym training (DAgger)...
+2025-12-25 21:05:26,895 | DAgger | WARNING | ⚠️ Model from S1 incompatible with Gym Obs. Re-initializing. Error: For parameter "kernel" in "/Dense_0", the given initializer is expected to generate shape (100, 64), but the existing parameter it received has shape (4, 64). (https://flax.readthedocs.io/en/latest/api_reference/flax.errors.html#flax.errors.ScopeParamShapeError)
+2025-12-25 21:05:31,029 | DAgger | INFO | 🔄 DAgger Round 1/3 | Dataset: 0 samples
+2025-12-25 21:07:20,315 | DAgger | INFO |    Train Loss: 0.0126
+2025-12-25 21:07:20,315 | DAgger | INFO | ✅ DAgger converged at round 0
+2025-12-25 21:07:20,324 | Gym | INFO | Validating Gym model on OOD maps...
+2025-12-25 21:07:20,325 | Gym | INFO | OOD Success: 96.0% (target: 80.0%) -> PASS
+2025-12-25 21:07:20,325 | FactoryManager | INFO | ✅ Station GymStation passed. Proceeding.
+2025-12-25 21:07:20,325 | FactoryManager | INFO | 🏭 Entering Station: LanguageSchoolStation
+2025-12-25 21:07:20,325 | LanguageSchool | INFO | Language School warmup: checking inputs...
+2025-12-25 21:07:20,395 | LanguageSchool | INFO | 📚 Starting Language School training (Consistency Layer)...
+2025-12-25 21:07:20,535 | LanguageSchool | INFO |   Loaded 9900 states for consistency training.
+2025-12-25 21:07:20,614 | LanguageSchool | WARNING | ⚠️ S2 model incompatible with S3 Obs. Re-initializing. Error: For parameter "kernel" in "/Dense_0", the given initializer is expected to generate shape (4, 256), but the existing parameter it received has shape (100, 256). (https://flax.readthedocs.io/en/latest/api_reference/flax.errors.html#flax.errors.ScopeParamShapeError)
+2025-12-25 21:07:27,923 | LanguageSchool | INFO |   Epoch 1/10 | Consistency Loss: 0.4609
+2025-12-25 21:07:32,319 | LanguageSchool | INFO |   Epoch 2/10 | Consistency Loss: 0.0128
+2025-12-25 21:07:36,754 | LanguageSchool | INFO |   Epoch 3/10 | Consistency Loss: 0.0026
+2025-12-25 21:07:41,070 | LanguageSchool | INFO |   Epoch 4/10 | Consistency Loss: 0.0014
+2025-12-25 21:07:45,448 | LanguageSchool | INFO |   Epoch 5/10 | Consistency Loss: 0.0008
+2025-12-25 21:07:49,784 | LanguageSchool | INFO |   Epoch 6/10 | Consistency Loss: 0.0005
+2025-12-25 21:07:54,097 | LanguageSchool | INFO |   Epoch 7/10 | Consistency Loss: 0.0004
+2025-12-25 21:07:58,463 | LanguageSchool | INFO |   Epoch 8/10 | Consistency Loss: 0.0003
+2025-12-25 21:08:02,741 | LanguageSchool | INFO |   Epoch 9/10 | Consistency Loss: 0.0002
+2025-12-25 21:08:07,093 | LanguageSchool | INFO |   Epoch 10/10 | Consistency Loss: 0.0002
+2025-12-25 21:08:07,106 | FactoryManager | INFO | ✅ Station LanguageSchoolStation passed. Proceeding.
+2025-12-25 21:08:07,107 | FactoryManager | INFO | 🏭 Entering Station: TeamBuildingStation
+2025-12-25 21:08:07,107 | TeamBuilding | INFO | Team Building warmup: setting up multi-agent env...
+2025-12-25 21:08:07,107 | TeamBuilding | INFO | 🤝 Starting Team Building training (MAPPO)...
+2025-12-25 21:08:09,308 | TeamBuilding | INFO | TeamBuilding Env Dims: Obs=100, Agents=5
+2025-12-25 21:08:27,057 | TeamBuilding | INFO | Epoch 0: Actor Loss=0.8733, Critic Loss=28.1772
+2025-12-25 21:08:35,727 | TeamBuilding | INFO | Epoch 1: Actor Loss=0.9010, Critic Loss=19.1818
+2025-12-25 21:08:44,396 | TeamBuilding | INFO | Epoch 2: Actor Loss=0.8921, Critic Loss=24.2878
+2025-12-25 21:08:53,104 | TeamBuilding | INFO | Epoch 3: Actor Loss=0.9984, Critic Loss=18.9505
+2025-12-25 21:09:01,800 | TeamBuilding | INFO | Epoch 4: Actor Loss=0.9654, Critic Loss=16.7282
+2025-12-25 21:09:10,397 | TeamBuilding | INFO | Epoch 5: Actor Loss=0.9827, Critic Loss=25.5590
+2025-12-25 21:09:19,061 | TeamBuilding | INFO | Epoch 6: Actor Loss=0.9417, Critic Loss=25.4128
+2025-12-25 21:09:27,693 | TeamBuilding | INFO | Epoch 7: Actor Loss=0.9387, Critic Loss=25.7302
+2025-12-25 21:09:36,322 | TeamBuilding | INFO | Epoch 8: Actor Loss=0.9448, Critic Loss=30.0187
+2025-12-25 21:09:45,056 | TeamBuilding | INFO | Epoch 9: Actor Loss=0.9534, Critic Loss=30.6920
+2025-12-25 21:09:53,751 | TeamBuilding | INFO | Epoch 10: Actor Loss=1.0006, Critic Loss=38.8901
+2025-12-25 21:10:02,385 | TeamBuilding | INFO | Epoch 11: Actor Loss=0.9960, Critic Loss=14.9700
+2025-12-25 21:10:11,015 | TeamBuilding | INFO | Epoch 12: Actor Loss=0.8841, Critic Loss=9.8348
+2025-12-25 21:10:19,833 | TeamBuilding | INFO | Epoch 13: Actor Loss=1.0185, Critic Loss=9.8416
+2025-12-25 21:10:28,510 | TeamBuilding | INFO | Epoch 14: Actor Loss=0.8781, Critic Loss=13.5289
+2025-12-25 21:10:37,188 | TeamBuilding | INFO | Epoch 15: Actor Loss=0.9239, Critic Loss=15.1863
+2025-12-25 21:10:45,823 | TeamBuilding | INFO | Epoch 16: Actor Loss=1.0114, Critic Loss=27.4578
+2025-12-25 21:10:54,553 | TeamBuilding | INFO | Epoch 17: Actor Loss=0.8107, Critic Loss=29.7752
+2025-12-25 21:11:03,242 | TeamBuilding | INFO | Epoch 18: Actor Loss=0.8232, Critic Loss=24.6296
+2025-12-25 21:11:11,858 | TeamBuilding | INFO | Epoch 19: Actor Loss=0.9476, Critic Loss=20.7946
+2025-12-25 21:11:11,858 | TeamBuilding | INFO | MAPPO training complete.
+2025-12-25 21:11:11,860 | TeamBuilding | INFO | Validating Team Building on cooperative scenarios...
+2025-12-25 21:11:11,860 | TeamBuilding | INFO | Reward: 120.0 (target: 10.0) -> PASS
+2025-12-25 21:11:11,860 | FactoryManager | INFO | ✅ Station TeamBuildingStation passed. Proceeding.
+2025-12-25 21:11:11,861 | FactoryManager | INFO | 🏭 Entering Station: WarRoomStation
+2025-12-25 21:11:11,861 | WarRoom | INFO | War Room warmup: preparing chaos scenarios...
+2025-12-25 21:11:11,861 | WarRoom | INFO | ⚔️ Starting War Room training (Chaos Monkey)...
+2025-12-25 21:11:11,884 | WarRoom | INFO | WarRoom Env Dims: Obs=100, Agents=5
+2025-12-25 21:11:11,993 | WarRoom | INFO | Transferring weights from S4...
+2025-12-25 21:11:11,994 | WarRoom | INFO | 🔥 Scenario: sensor_dropout | Params: {'name': 'sensor_dropout', 'noise_level': 0.1}
+2025-12-25 21:11:20,676 | WarRoom | INFO |    Epoch 0: A_Loss=0.834 C_Loss=23.817
+2025-12-25 21:11:29,285 | WarRoom | INFO |    Epoch 1: A_Loss=0.853 C_Loss=16.318
+2025-12-25 21:11:29,285 | WarRoom | INFO | ✅ Survived sensor_dropout
+2025-12-25 21:11:29,285 | WarRoom | INFO | 🔥 Scenario: physics_friction | Params: {'name': 'physics_friction', 'friction': 0.5}
+2025-12-25 21:11:38,021 | WarRoom | INFO |    Epoch 0: A_Loss=1.103 C_Loss=24.219
+2025-12-25 21:11:46,755 | WarRoom | INFO |    Epoch 1: A_Loss=1.010 C_Loss=16.098
+2025-12-25 21:11:46,756 | WarRoom | INFO | ✅ Survived physics_friction
+2025-12-25 21:11:46,756 | WarRoom | INFO | 🔥 Scenario: adversarial_agents | Params: {'name': 'adversarial_agents', 'adversary_strength': 0.5}
+2025-12-25 21:11:55,424 | WarRoom | INFO |    Epoch 0: A_Loss=0.991 C_Loss=18.019
+2025-12-25 21:12:04,100 | WarRoom | INFO |    Epoch 1: A_Loss=0.894 C_Loss=16.374
+2025-12-25 21:12:04,100 | WarRoom | INFO | ✅ Survived adversarial_agents
+2025-12-25 21:12:04,100 | WarRoom | INFO | 🔥 Scenario: communication_failure | Params: {'name': 'communication_failure', 'comm_drop_prob': 0.2}
+2025-12-25 21:12:12,768 | WarRoom | INFO |    Epoch 0: A_Loss=0.989 C_Loss=30.060
+2025-12-25 21:12:21,371 | WarRoom | INFO |    Epoch 1: A_Loss=0.926 C_Loss=23.322
+2025-12-25 21:12:21,372 | WarRoom | INFO | ✅ Survived communication_failure
+2025-12-25 21:12:21,372 | WarRoom | INFO | Adversarial training complete.
+2025-12-25 21:12:21,373 | WarRoom | INFO | Validating War Room survival rate...
+2025-12-25 21:12:21,374 | WarRoom | INFO | Survival: 97.0% (target: 50.0%) -> PASS
+2025-12-25 21:12:21,374 | FactoryManager | INFO | ✅ Station WarRoomStation passed. Proceeding.
+2025-12-25 21:12:21,374 | FactoryManager | INFO | 🏭 Entering Station: DomainRandomizationStation
+2025-12-25 21:12:21,374 | DomainRandomization | INFO | Domain Randomization warmup: preparing randomized envs...
+2025-12-25 21:12:21,374 | DomainRandomization | INFO | 🎲 Starting Domain Randomization training...
+2025-12-25 21:12:21,374 | DomainRandomization | INFO | DR training complete (mock)
+2025-12-25 21:12:21,374 | DomainRandomization | INFO | Computing generalization gap...
+2025-12-25 21:12:21,375 | DomainRandomization | INFO | Gap: 6.0% (max: 10.0%) -> PASS
+2025-12-25 21:12:21,375 | FactoryManager | INFO | ✅ Station DomainRandomizationStation passed. Proceeding.
+2025-12-25 21:12:21,375 | FactoryManager | INFO | 🎉 Factory Pipeline Completed Successfully!
+2025-12-25 21:12:21,375 | ProductionMain | INFO | 🎉🎉 FACTORY COMPLETE. MASTER MODEL CERTIFIED. 🎉🎉
+2025-12-25 21:12:21,379 | ProductionMain | INFO | 💾 Checkpoints saved in 'outputs/checkpoints/'

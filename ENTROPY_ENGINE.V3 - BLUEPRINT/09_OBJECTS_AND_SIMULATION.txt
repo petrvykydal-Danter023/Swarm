@@ -1,0 +1,581 @@
+================================================================================
+                    09_OBJECTS_AND_SIMULATION.txt
+                    Objekty, Terén a Sim-to-Real Bridge
+================================================================================
+
+================================================================================
+1. MANIPULOVATELNÉ OBJEKTY (The Loot)
+================================================================================
+
+Agenti s těmito objekty interagují. Pro přenos do reality (IRL) musíme
+simulovat váhu, tření a kooperativní manipulaci.
+
+1.1 KRABICE (Crates)
+--------------------
+```python
+@dataclass
+class CrateComponent:
+    mass: float           # kg
+    friction_static: float  # Statické tření (nutná síla k rozjetí)
+    friction_kinetic: float # Kinetické tření (při pohybu)
+    requires_coop: int    # Kolik agentů musí tlačit najednou (1, 2, 3...)
+    value: float          # Bodová hodnota při donesení do cíle
+```
+
+Typy:
+  - LIGHT: mass=1.0, requires_coop=1
+  - HEAVY: mass=10.0, requires_coop=2  
+  - SUPER_HEAVY: mass=50.0, requires_coop=4
+
+Kooperativní logika:
+```python
+@jax.jit
+def compute_crate_movement(forces_on_crate, crate_mass, static_friction):
+    """
+    Krabice se pohne JEN když součet sil překoná statické tření.
+    Simulace reality: 2 agenti musí tlačit naráz.
+    """
+    total_force = jnp.sum(forces_on_crate, axis=0)  # [num_pushers, 2] -> [2]
+    force_magnitude = jnp.linalg.norm(total_force)
+    
+    friction_threshold = static_friction * crate_mass * GRAVITY
+    
+    # Krabice se pohne jen když síla > tření
+    moves = force_magnitude > friction_threshold
+    
+    velocity = jnp.where(
+        moves,
+        total_force / crate_mass,  # Newton: F = ma
+        jnp.zeros(2)
+    )
+    return velocity
+```
+
+1.2 GEOMETRICKÁ PRIMITIVA
+-------------------------
+Pro rychlou fyziku (JAX/Brax) používáme jednoduchá tělesa:
+
+  - SPHERE (Koule): Kutálí se, ideální pro testování push mechanik
+  - CYLINDER (Válec): Kutálí se v jedné ose, simulace sudů/trubek
+  - CAPSULE (Kapsle): Koule na koncích válce, realistické kolize
+  - BOX (Kostka): Základní krabice
+
+```python
+@dataclass  
+class PrimitiveComponent:
+    shape_type: str       # "sphere", "cylinder", "capsule", "box"
+    dimensions: jnp.ndarray  # [3] - (radius, height, depth) nebo podle typu
+    inertia_tensor: jnp.ndarray  # [3, 3] - pro rotaci
+```
+
+1.3 NON-CONVEX OBJEKTY (Složité tvary)
+--------------------------------------
+Tvary L, T, U které se při strčení TOČÍ nepředvídatelně.
+KLÍČOVÉ pro trénink - agent se nenaučí "tlač dopředu", ale "tlač dokud nedosáhneš cíle".
+
+```python
+# Reprezentace jako COMPOUND SHAPE (složeno z primitivů)
+@dataclass
+class CompoundShape:
+    primitives: list      # Seznam primitivů
+    offsets: jnp.ndarray  # [num_primitives, 3] - pozice relativně k centru
+    rotations: jnp.ndarray # [num_primitives, 4] - quaterniony
+```
+
+IRL ekvivalenty: Nábytek, palety, stavební materiál.
+
+1.4 SOFT BODIES (Měkké objekty) - Advanced
+------------------------------------------
+Pro budoucnost: pytle s pískem, látky, lana.
+Simulace jako "particle chain" se spring constraints:
+
+```python
+@dataclass
+class SoftBodyComponent:
+    particle_positions: jnp.ndarray  # [num_particles, 3]
+    particle_velocities: jnp.ndarray
+    spring_pairs: jnp.ndarray  # [num_springs, 2] - indexy spojených částic
+    spring_stiffness: float
+    spring_rest_length: jnp.ndarray  # [num_springs]
+```
+
+================================================================================
+2. PROSTŘEDÍ A TERÉN (The Map)
+================================================================================
+
+2.1 ZÓNY (Triggers)
+-------------------
+Neviditelné oblasti, které spouští akce při vstupu agenta.
+
+```python
+@dataclass
+class ZoneComponent:
+    zone_type: str        # "dropoff", "charging", "hazard", "spawn"
+    bounds: jnp.ndarray   # [4] - (x_min, y_min, x_max, y_max)
+    effect_strength: float # Pro hazard = damage/sec, pro charging = energy/sec
+    team_id: int          # -1 = všichni, jinak jen pro určitý tým
+```
+
+Typy zón:
+  - DROP_OFF: Místo kam donést objekty (agent gets reward)
+  - CHARGING: Nabíjecí stanice (obnoví energii)
+  - HAZARD_FIRE: Oheň (damage over time)
+  - HAZARD_WATER: Voda (zpomalení, klouzání)
+  - HAZARD_RADIATION: Radiace (postupné poškození)
+  - SPAWN_POINT: Místo kde se agenti/objekty generují
+
+Vizualizace:
+  - Poloprůhledné barevné čtverce na zemi
+  - Animované okraje (pulzující čáry)
+
+2.2 STATICKÉ PŘEKÁŽKY
+---------------------
+```python
+@dataclass
+class WallComponent:
+    wall_type: str        # "static", "destructible"
+    health: float         # Pro destructible (0 = zničeno)
+    collision_mask: int   # Bitová maska pro kolizní skupiny
+```
+
+Typy:
+  - STATIC_WALL: Nepropustná zeď (klasika)
+  - DESTRUCTIBLE_WALL: Agenti mohou rozebrat/odtlačit
+  - GLASS_WALL: Vidí skrz, ale kolize platí (pro testování occlusion)
+
+2.3 TERÉNNÍ VLASTNOSTI (Friction Maps)
+--------------------------------------
+Různé části mapy mají různá tření:
+
+```python
+@dataclass
+class TerrainComponent:
+    friction_map: jnp.ndarray  # [grid_x, grid_y] - hodnoty tření 0.0-1.0
+    elevation_map: jnp.ndarray # [grid_x, grid_y] - výška terénu (pro 2.5D)
+    grid_resolution: float     # Velikost jedné buňky v metrech
+```
+
+Povrchy:
+  - NORMAL: friction=0.7 (standardní podlaha)
+  - ICE: friction=0.1 (klouzání!)
+  - CARPET: friction=0.9 (vysoké tření)
+  - GRAVEL: friction=0.5, elevation_noise (nerovnosti)
+  - RAMP: elevation gradient (kopec)
+
+2.4 RAMPY A SVAHY (3D/2.5D)
+---------------------------
+```python
+def compute_slope_effect(agent_pos, elevation_map, grid_resolution):
+    """
+    Agent jedoucí do kopce musí vyvinout více síly.
+    Agent jedoucí z kopce akceleruje.
+    """
+    # Sample elevation gradient at agent position
+    gradient = sample_gradient(elevation_map, agent_pos, grid_resolution)
+    
+    # Direction agent is facing
+    facing = jnp.array([jnp.cos(agent_angle), jnp.sin(agent_angle)])
+    
+    # Dot product = jak moc jede do/z kopce
+    slope_alignment = jnp.dot(gradient, facing)
+    
+    # Positive = do kopce (ztráta síly), Negative = z kopce (zisk)
+    force_modifier = 1.0 - slope_alignment * SLOPE_STRENGTH
+    
+    return force_modifier
+```
+
+================================================================================
+3. DYNAMICKÉ OBJEKTY (The Chaos)
+================================================================================
+
+3.1 INTRUDERS (Vetřelci)
+------------------------
+Entity které se pohybují náhodně - simulace lidí, zvířat, jiných robotů.
+
+```python
+@dataclass
+class IntruderComponent:
+    behavior: str         # "random_walk", "patrol", "follow", "flee"
+    speed: float
+    waypoints: jnp.ndarray  # [num_waypoints, 2] pro patrol
+    awareness_radius: float # Jak daleko "vidí" agenty (pro flee/follow)
+```
+
+Chování:
+  - RANDOM_WALK: Náhodný směr, mění se každých N kroků
+  - PATROL: Prochází mezi waypointy
+  - FOLLOW: Sleduje nejbližšího agenta
+  - FLEE: Utíká od agentů
+
+Agenti se jim musí VYHÝBAT (safety constraint v reward).
+
+3.2 POHYBLIVÉ PLOŠINY
+---------------------
+```python
+@dataclass
+class MovingPlatformComponent:
+    path_points: jnp.ndarray  # [num_points, 2]
+    speed: float
+    current_segment: int
+    direction: int          # 1 = forward, -1 = backward
+    wait_time: float        # Čekání na koncích
+```
+
+Typy:
+  - ELEVATOR: Vertikální (2.5D)
+  - CONVEYOR_BELT: Posune agenty určitým směrem
+  - ROTATING_PLATFORM: Otáčí se (agent musí kompenzovat)
+
+3.3 DVEŘE A BRÁNY
+-----------------
+```python
+@dataclass
+class DoorComponent:
+    state: str            # "open", "closed", "opening", "closing"
+    trigger_type: str     # "proximity", "button", "timer", "coop"
+    required_agents: int  # Pro coop trigger
+    open_duration: float  # Jak dlouho zůstane otevřeno
+```
+
+================================================================================
+4. VIZUALIZACE AGENTA (Debug View)
+================================================================================
+
+4.1 TĚLO AGENTA
+---------------
+```python
+def render_agent(pos, angle, state, cfg):
+    """
+    Základní tělo + vizuální indikátory.
+    """
+    # Směrová šipka (kam kouká předek)
+    draw_triangle(pos, angle, size=cfg.agent_radius)
+    
+    # Nebo: Kruh + čára směru
+    draw_circle(pos, cfg.agent_radius)
+    draw_line(pos, pos + [cos(angle), sin(angle)] * cfg.agent_radius)
+```
+
+4.2 STATUS RING (Stavová aura)
+------------------------------
+Barevný kruh pod agentem podle stavu:
+
+```python
+STATUS_COLORS = {
+    "idle": (0.5, 0.5, 0.5, 0.3),     # Šedá - nic nedělá
+    "moving": (0.0, 0.7, 0.0, 0.5),   # Zelená - pohybuje se
+    "carrying": (0.0, 0.5, 1.0, 0.6), # Modrá - nese objekt
+    "pushing": (1.0, 0.5, 0.0, 0.6),  # Oranžová - tlačí
+    "communicating": (1.0, 1.0, 0.0, 0.7), # Žlutá - mluví
+    "danger": (1.0, 0.0, 0.0, 0.8),   # Červená - v nebezpečí
+    "low_energy": (0.5, 0.0, 0.5, 0.6), # Fialová - málo energie
+}
+```
+
+4.3 KOMUNIKAČNÍ LINKY
+---------------------
+Když agent A mluví s agentem B, nakresli čáru:
+
+```python
+def render_communication_links(agents, messages, attention_weights):
+    """
+    Vizualizace jako neuronová síť v prostoru.
+    """
+    for i, sender in enumerate(agents):
+        token = argmax(messages[i][:32])
+        if token == SILENCE_TOKEN:
+            continue
+            
+        # Pokud máme attention weights (Transformer decoder)
+        if attention_weights is not None:
+            for j, receiver in enumerate(agents):
+                if i == j:
+                    continue
+                weight = attention_weights[i, j]
+                if weight > 0.1:  # Threshold
+                    draw_line(
+                        sender.pos, receiver.pos,
+                        color=get_token_color(token),
+                        alpha=weight,
+                        width=weight * 3
+                    )
+        else:
+            # Broadcast: čáry ke všem
+            for j, receiver in enumerate(agents):
+                if i != j:
+                    draw_line(sender.pos, receiver.pos, alpha=0.2)
+```
+
+4.4 SENSOR RAYS (Lidar Debug)
+-----------------------------
+```python
+def render_lidar(agent, lidar_readings, max_range):
+    """
+    Vykreslí Lidar paprsky pro debugování.
+    Červené = blízká překážka, Zelené = volno.
+    """
+    num_rays = len(lidar_readings)
+    for i, reading in enumerate(lidar_readings):
+        angle = agent.angle + (i / num_rays) * 2 * PI
+        end_pos = agent.pos + [cos(angle), sin(angle)] * reading * max_range
+        
+        # Barva podle vzdálenosti
+        color = interpolate_color(RED, GREEN, reading)
+        
+        draw_line(agent.pos, end_pos, color=color, alpha=0.3)
+```
+
+4.5 VELOCITY VECTORS
+--------------------
+```python
+def render_velocity(agent):
+    """Šipka ukazující směr a rychlost pohybu."""
+    vel_magnitude = norm(agent.velocity)
+    if vel_magnitude > 0.1:
+        direction = agent.velocity / vel_magnitude
+        arrow_length = min(vel_magnitude * 0.5, 30)  # Cap délky
+        draw_arrow(agent.pos, agent.pos + direction * arrow_length, color=CYAN)
+```
+
+================================================================================
+5. SIM-TO-REAL BRIDGE (Přenos do Reality)
+================================================================================
+
+5.1 DOMAIN RANDOMIZATION
+------------------------
+KAŽDOU EPIZODU náhodně změň fyzikální parametry:
+
+```python
+@dataclass
+class DomainRandomizationConfig:
+    # Rozsahy pro randomizaci
+    mass_range: tuple = (0.8, 1.2)        # *1.0 = nominální hmotnost
+    friction_range: tuple = (0.5, 1.5)    # *1.0 = nominální tření
+    motor_strength_range: tuple = (0.7, 1.3)
+    sensor_noise_std: float = 0.05        # Šum senzorů
+    actuator_noise_std: float = 0.02      # Šum motorů
+    
+def apply_domain_randomization(world_state, cfg, rng):
+    """
+    Randomizuj fyziku na začátku epizody.
+    Agent se naučí být ROBUSTNÍ, ne přesný.
+    """
+    rng, key1, key2, key3 = jax.random.split(rng, 4)
+    
+    # Randomizuj hmotnosti objektů
+    mass_scale = jax.random.uniform(key1, minval=cfg.mass_range[0], maxval=cfg.mass_range[1])
+    world_state = world_state.replace(
+        object_masses=world_state.object_masses * mass_scale
+    )
+    
+    # Randomizuj tření
+    friction_scale = jax.random.uniform(key2, ...)
+    
+    # Randomizuj sílu motorů
+    motor_scale = jax.random.uniform(key3, ...)
+    
+    return world_state, {"mass_scale": mass_scale, ...}
+```
+
+5.2 SENSOR NOISE
+----------------
+V realitě Lidar a kamery hází chyby:
+
+```python
+@jax.jit
+def add_sensor_noise(lidar_readings, noise_std, rng):
+    """
+    Gaussian noise na Lidar.
+    Některé paprsky mohou reportovat špatnou vzdálenost.
+    """
+    noise = jax.random.normal(rng, shape=lidar_readings.shape) * noise_std
+    noisy_readings = lidar_readings + noise
+    
+    # Clip do rozumných hodnot
+    noisy_readings = jnp.clip(noisy_readings, 0.0, 1.0)
+    
+    # Občas paprsek úplně selže (returns 0 nebo max)
+    dropout_mask = jax.random.uniform(rng, shape=lidar_readings.shape) > 0.02
+    noisy_readings = jnp.where(dropout_mask, noisy_readings, 1.0)
+    
+    return noisy_readings
+```
+
+5.3 ACTUATOR NOISE
+------------------
+Robot nejede přesně kam chceš:
+
+```python
+@jax.jit
+def add_actuator_noise(commanded_action, noise_std, rng):
+    """
+    Motor neprovede přesně co řekneš.
+    "Jeď rovně" -> ve skutečnosti mírně zatáčí.
+    """
+    noise = jax.random.normal(rng, shape=commanded_action.shape) * noise_std
+    actual_action = commanded_action + noise
+    
+    # Asymetrie motorů (jeden silnější než druhý)
+    motor_bias = jnp.array([0.02, -0.01])  # Konstantní offset
+    actual_action = actual_action + motor_bias
+    
+    return jnp.clip(actual_action, -1.0, 1.0)
+```
+
+5.4 ENERGY/BATTERY MODEL
+------------------------
+```python
+@dataclass
+class EnergyComponent:
+    current_energy: float = 100.0
+    max_energy: float = 100.0
+    
+    # Spotřeba
+    move_cost_per_step: float = 0.01
+    communicate_cost: float = 0.05
+    carry_cost_multiplier: float = 2.0  # Nesení objektu = 2x spotřeba
+    
+    # Nabíjení
+    charge_rate: float = 0.5  # Per step v charging zone
+
+@jax.jit
+def update_energy(energy, action, is_carrying, is_in_charging_zone, cfg):
+    """
+    Aktualizuj energii agenta.
+    Když dojde, agent se nemůže hýbat!
+    """
+    # Základní spotřeba za pohyb
+    movement_magnitude = jnp.linalg.norm(action)
+    base_cost = movement_magnitude * cfg.move_cost_per_step
+    
+    # Bonusová spotřeba za nesení
+    carry_mult = jnp.where(is_carrying, cfg.carry_cost_multiplier, 1.0)
+    total_cost = base_cost * carry_mult
+    
+    # Nabíjení v charging zone
+    charge = jnp.where(is_in_charging_zone, cfg.charge_rate, 0.0)
+    
+    new_energy = jnp.clip(energy - total_cost + charge, 0.0, cfg.max_energy)
+    
+    return new_energy
+```
+
+5.5 OCCLUSION (Zákryt)
+----------------------
+Agenti nevidí "skrz zdi":
+
+```python
+@jax.jit
+def compute_visibility(observer_pos, target_pos, walls):
+    """
+    Raycast: Je přímá viditelnost mezi observer a target?
+    Vrací True pokud ANO.
+    """
+    # Raycast from observer to target
+    hit = raycast_segment(observer_pos, target_pos, walls)
+    
+    # Pokud ray narazí na zeď PŘED targetem, není vidět
+    return ~hit  # True = viditelný
+
+def filter_visible_agents(agent_idx, all_agents, walls):
+    """
+    Agent vidí jen ty, ke kterým není zeď.
+    Toto ovlivňuje jaké zprávy "slyší".
+    """
+    observer = all_agents[agent_idx]
+    visible_mask = jax.vmap(
+        lambda target: compute_visibility(observer.pos, target.pos, walls)
+    )(all_agents)
+    visible_mask = visible_mask.at[agent_idx].set(False)  # Nevidím sám sebe
+    return visible_mask
+```
+
+================================================================================
+6. RENDERING OPTIMALIZACE (GPU Performance)
+================================================================================
+
+6.1 INSTANCED RENDERING
+-----------------------
+NEVOLEJ `draw_cube()` 1000x. Pošli na GPU JEDNOU:
+
+```python
+# Vispy instanced rendering
+from vispy import gloo
+
+class InstancedAgents:
+    def __init__(self, max_agents=1000):
+        # Jeden model agenta (trojúhelník)
+        self.base_vertices = np.array([...])  # Template mesh
+        
+        # Instance data (pozice, rotace, barva pro VŠECHNY agenty)
+        self.instance_positions = np.zeros((max_agents, 2), dtype=np.float32)
+        self.instance_rotations = np.zeros(max_agents, dtype=np.float32)
+        self.instance_colors = np.zeros((max_agents, 4), dtype=np.float32)
+        
+        # GPU buffer
+        self.instance_buffer = gloo.VertexBuffer(self.instance_positions)
+        
+    def update(self, agent_data):
+        """Update all instances at once."""
+        self.instance_positions[:len(agent_data)] = agent_data.positions
+        self.instance_buffer.set_data(self.instance_positions)
+        
+    def draw(self):
+        """Single draw call for ALL agents."""
+        # glDrawArraysInstanced equivalent
+        self.program.draw('triangles', instances=self.num_active)
+```
+
+6.2 SDF KOLIZE (Signed Distance Fields)
+---------------------------------------
+Místo mesh kolizí použij matematické funkce:
+
+```python
+def sdf_circle(point, center, radius):
+    """Signed distance to circle. Negative = inside."""
+    return jnp.linalg.norm(point - center) - radius
+
+def sdf_box(point, center, half_size):
+    """Signed distance to axis-aligned box."""
+    d = jnp.abs(point - center) - half_size
+    return jnp.linalg.norm(jnp.maximum(d, 0.0)) + jnp.minimum(jnp.max(d), 0.0)
+
+def sdf_union(sdf_a, sdf_b):
+    """Union of two shapes."""
+    return jnp.minimum(sdf_a, sdf_b)
+
+# VEKTORIZOVANÁ kolize pro všechny agenty najednou
+@jax.jit
+def check_collisions_sdf(agent_positions, obstacle_sdfs):
+    """
+    Kontrola kolizí pro N agentů ve Mx překážek.
+    Vrací [N, M] matici vzdáleností.
+    """
+    # vmap přes agenty, vmap přes překážky
+    distances = jax.vmap(
+        lambda agent_pos: jax.vmap(
+            lambda obs_sdf: obs_sdf(agent_pos)
+        )(obstacle_sdfs)
+    )(agent_positions)
+    
+    return distances < 0  # True = kolize
+```
+
+6.3 DATA-ORIENTED RENDERING
+---------------------------
+```python
+# ŠPATNĚ (OOP):
+for agent in agents:
+    render(agent.position, agent.color)  # 1000 Python calls
+
+# SPRÁVNĚ (DoD):
+positions = np.array([a.position for a in agents])  # [N, 2]
+colors = np.array([a.color for a in agents])        # [N, 3]
+render_batch(positions, colors)  # 1 GPU call
+```
+
+================================================================================
+                            KONEC OBJECTS & SIM
+           Pokračuj čtením 10_EXTENSIBILITY_EXAMPLES.txt.
+================================================================================

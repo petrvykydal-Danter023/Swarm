@@ -1,0 +1,652 @@
+================================================================================
+                    11_HAND_OF_GOD.txt
+                    Asistované Učení (Shared Autonomy)
+================================================================================
+
+================================================================================
+1. CO JE HAND OF GOD?
+================================================================================
+
+Technika pro DRASTICKÉ zrychlení učení komplexních chování.
+AI si myslí, že řídí sama, ale Expert ji jemně vede.
+
+PRINCIP:
+```
+┌─────────────────┐     ┌─────────────────┐
+│   AI POLICY     │     │  EXPERT POLICY  │
+│     (PPO)       │     │   (A*/Rules)    │
+└────────┬────────┘     └────────┬────────┘
+         │ ai_action             │ expert_action
+         └───────────┬───────────┘
+                     ▼
+            ┌─────────────────┐
+            │   ACTION MIXER  │
+            │   alpha: 0.0-1.0│
+            └────────┬────────┘
+                     │ 
+    alpha=1.0: Expert řídí (AI pozoruje)
+    alpha=0.5: 50/50 mix
+    alpha=0.0: AI řídí (Expert mlčí)
+```
+
+ZRYCHLENÍ:
+  - Navigace: 10x rychlejší
+  - Formace: 100x rychlejší (bez experta téměř nemožné!)
+  - Komunikace: 5x rychlejší grounding
+
+================================================================================
+2. ARCHITEKTURA (Plugin, ne změna jádra)
+================================================================================
+
+Hand of God je VOLITELNÝ MODUL. Pokud je vypnutý, engine běží normálně.
+
+```
+entropy/training/hand_of_god/
+├── expert_policies/
+│   ├── base.py              # AbstractExpertPolicy
+│   ├── astar_navigator.py   # A* pro navigaci
+│   ├── formation_expert.py  # Geometrické formace
+│   ├── rule_based_comm.py   # DIAL-style injection
+│   └── human_input.py       # Mouse/keyboard override
+├── action_mixer.py          # Alpha blending
+├── demonstration_buffer.py  # Ukládá demonstrace
+├── alpha_scheduler.py       # Decay strategie
+└── time_travel.py           # Rewind funkce
+```
+
+================================================================================
+3. EXPERT POLICIES
+================================================================================
+
+3.1 BASE INTERFACE
+------------------
+```python
+from abc import ABC, abstractmethod
+
+class ExpertPolicy(ABC):
+    """
+    Interface pro všechny experty.
+    Expert dostává PLNÝ STATE (privileged info).
+    AI dostává jen OBSERVATION (partial info).
+    """
+    
+    @abstractmethod
+    def act(self, state: WorldState) -> jnp.ndarray:
+        """Vrátí akce [N_agents, action_dim]."""
+        pass
+    
+    @property
+    def is_privileged(self) -> bool:
+        """Expert má více informací než student."""
+        return True
+```
+
+3.2 A* NAVIGATOR
+----------------
+```python
+class AStarNavigator(ExpertPolicy):
+    """Expert pro navigaci. Vidí celou mapu, zná optimální cestu."""
+    
+    def __init__(self, resolution=10):
+        self.resolution = resolution
+        
+    def act(self, state: WorldState) -> jnp.ndarray:
+        actions = []
+        for i in range(state.num_agents):
+            # A* od agent[i].pos k goal[i].pos
+            path = astar(
+                start=state.agent_positions[i],
+                goal=state.goal_positions[i],
+                obstacles=state.wall_segments,
+                resolution=self.resolution
+            )
+            # Konvertuj path na motor commands
+            direction = path[1] - state.agent_positions[i]
+            action = direction_to_differential_drive(direction, state.agent_angles[i])
+            actions.append(action)
+        return jnp.stack(actions)
+```
+
+3.3 FORMATION EXPERT
+--------------------
+```python
+class FormationExpert(ExpertPolicy):
+    """Expert pro formace. Počítá ideální pozice a naviguje k nim."""
+    
+    def __init__(self, formation_type="line", spacing=30.0):
+        self.formation_type = formation_type
+        self.spacing = spacing
+        
+    def act(self, state: WorldState) -> jnp.ndarray:
+        # Najdi leadera (agent 0 nebo ten s RoleComponent.LEADER)
+        leader_pos = state.agent_positions[0]
+        leader_angle = state.agent_angles[0]
+        
+        # Vypočítej cílové pozice pro formaci
+        if self.formation_type == "line":
+            targets = self._line_formation(leader_pos, leader_angle, state.num_agents)
+        elif self.formation_type == "v":
+            targets = self._v_formation(leader_pos, leader_angle, state.num_agents)
+        elif self.formation_type == "circle":
+            targets = self._circle_formation(leader_pos, state.num_agents)
+            
+        # Naviguj každého agenta k jeho cílové pozici
+        actions = []
+        for i in range(state.num_agents):
+            direction = targets[i] - state.agent_positions[i]
+            action = direction_to_differential_drive(direction, state.agent_angles[i])
+            actions.append(action)
+        return jnp.stack(actions)
+    
+    def _line_formation(self, leader_pos, leader_angle, n):
+        """Linie za leaderem."""
+        targets = [leader_pos]
+        perpendicular = jnp.array([-jnp.sin(leader_angle), jnp.cos(leader_angle)])
+        for i in range(1, n):
+            offset = perpendicular * self.spacing * (i - n//2)
+            targets.append(leader_pos + offset)
+        return jnp.stack(targets)
+```
+
+3.4 RULE-BASED COMMUNICATION
+----------------------------
+```python
+class RuleBasedCommunication(ExpertPolicy):
+    """
+    Expert pro komunikaci.
+    Říká agentům CO mají vysílat (ground truth tokens).
+    Stejný princip jako DIAL Hard Injection v V2.
+    """
+    
+    def act(self, state: WorldState) -> jnp.ndarray:
+        messages = []
+        for i in range(state.num_agents):
+            # Pravidla co říct
+            if is_carrying_object(state, i):
+                token = Token.CARRYING
+                payload = state.object_positions[get_carried_object(state, i)]
+            elif can_see_goal(state, i):
+                token = Token.FOUND_TARGET
+                payload = state.goal_positions[i]
+            elif is_in_danger(state, i):
+                token = Token.DANGER
+                payload = danger_source_position(state, i)
+            else:
+                token = Token.SILENCE
+                payload = jnp.zeros(4)
+                
+            messages.append(encode_message(token, payload))
+        return jnp.stack(messages)
+```
+
+================================================================================
+4. ACTION MIXER
+================================================================================
+
+```python
+class ActionMixer:
+    """Mixuje AI a Expert akce podle alpha."""
+    
+    def mix(self, ai_actions, expert_actions, alpha, mode="lerp"):
+        """
+        Args:
+            ai_actions: [N, action_dim] - Co by udělala AI
+            expert_actions: [N, action_dim] - Co dělá expert
+            alpha: float 0-1 (1=expert, 0=AI)
+            mode: "lerp" pro kontinuální, "switch" pro diskrétní
+        """
+        if mode == "lerp":
+            # Lineární interpolace
+            return (1 - alpha) * ai_actions + alpha * expert_actions
+            
+        elif mode == "switch":
+            # Náhodný switch (pro diskrétní akce)
+            mask = jax.random.uniform(key, shape=(len(ai_actions),)) < alpha
+            return jnp.where(mask[:, None], expert_actions, ai_actions)
+            
+        elif mode == "correction":
+            # Expert zasahuje JEN když AI jede špatně
+            ai_quality = evaluate_action_quality(ai_actions, expert_actions)
+            return jnp.where(ai_quality < threshold, expert_actions, ai_actions)
+```
+
+================================================================================
+5. ALPHA SCHEDULER
+================================================================================
+
+```python
+class AlphaScheduler:
+    """Řídí decay alpha (snižování asistence)."""
+    
+    def __init__(self, strategy="linear", initial=1.0, final=0.0, decay_steps=100000):
+        self.strategy = strategy
+        self.initial = initial
+        self.final = final
+        self.decay_steps = decay_steps
+        self.step = 0
+        
+    def get_alpha(self):
+        if self.strategy == "linear":
+            progress = min(self.step / self.decay_steps, 1.0)
+            return self.initial + (self.final - self.initial) * progress
+            
+        elif self.strategy == "exponential":
+            decay = 0.9999
+            return max(self.final, self.initial * (decay ** self.step))
+            
+        elif self.strategy == "performance_based":
+            # Alpha klesá jen když AI performance roste
+            if self.recent_performance > threshold:
+                self.alpha *= 0.99
+            return self.alpha
+            
+    def step(self):
+        self.step += 1
+```
+
+================================================================================
+6. DEMONSTRATION BUFFER
+================================================================================
+
+```python
+@dataclass
+class Demonstration:
+    state: jnp.ndarray
+    ai_action: jnp.ndarray
+    expert_action: jnp.ndarray
+    executed_action: jnp.ndarray
+    was_corrected: bool
+    reward: float
+
+class DemonstrationBuffer:
+    """Ukládá demonstrace pro imitation learning."""
+    
+    def __init__(self, capacity=100000, correction_priority=2.0):
+        self.buffer = deque(maxlen=capacity)
+        self.correction_priority = correction_priority
+        
+    def add(self, demo: Demonstration):
+        self.buffer.append(demo)
+        
+    def sample(self, batch_size=256):
+        # Prioritní sampling: korekce mají vyšší pravděpodobnost
+        weights = [
+            self.correction_priority if d.was_corrected else 1.0 
+            for d in self.buffer
+        ]
+        indices = random.choices(range(len(self.buffer)), weights=weights, k=batch_size)
+        return [self.buffer[i] for i in indices]
+```
+
+================================================================================
+7. TRAINING LOOP INTEGRACE
+================================================================================
+
+```python
+def train_with_hand_of_god(cfg):
+    """Modifikovaný training loop s Hand of God."""
+    
+    env = create_env(cfg.env)
+    policy = create_policy(cfg.agent)
+    
+    # Hand of God komponenty (volitelné)
+    if cfg.hand_of_god.enabled:
+        expert = create_expert(cfg.hand_of_god.expert)
+        mixer = ActionMixer()
+        alpha_scheduler = AlphaScheduler(**cfg.hand_of_god.alpha_scheduler)
+        demo_buffer = DemonstrationBuffer(**cfg.hand_of_god.demonstration_buffer)
+    
+    for iteration in range(cfg.training.iterations):
+        state = env.reset()
+        
+        for step in range(cfg.training.max_steps):
+            obs = get_observations(state)
+            ai_actions = policy.act(obs)
+            
+            if cfg.hand_of_god.enabled:
+                expert_actions = expert.act(state)  # Expert má plný state
+                alpha = alpha_scheduler.get_alpha()
+                final_actions = mixer.mix(ai_actions, expert_actions, alpha)
+                
+                # Ulož demonstraci
+                demo_buffer.add(Demonstration(
+                    state=obs,
+                    ai_action=ai_actions,
+                    expert_action=expert_actions,
+                    executed_action=final_actions,
+                    was_corrected=(ai_actions != expert_actions).any(),
+                    reward=0  # Vyplníme později
+                ))
+                
+                alpha_scheduler.step()
+            else:
+                final_actions = ai_actions
+            
+            state, rewards, dones, infos = env.step(final_actions)
+            
+        # Update policy
+        if cfg.hand_of_god.enabled and cfg.hand_of_god.use_imitation_loss:
+            # Kombinovaný loss: RL + Behavioral Cloning
+            ppo_loss = compute_ppo_loss(policy, rollout_buffer)
+            bc_loss = compute_bc_loss(policy, demo_buffer.sample())
+            total_loss = ppo_loss + cfg.hand_of_god.bc_weight * bc_loss
+        else:
+            total_loss = compute_ppo_loss(policy, rollout_buffer)
+            
+        update_policy(policy, total_loss)
+```
+
+================================================================================
+7. FALLIBLE EXPERT (Adversarial Injection)
+================================================================================
+
+MOTIVACE:
+  Klasický Hand of God učí AI slepo následovat experta.
+  Problém: AI nemá vlastní úsudek. Jeden chybný příkaz = katastrofa.
+  
+  Řešení: Expert OBČAS ÚMYSLNĚ CHYBUJE. AI se musí naučit verifikovat rady.
+
+KONCEPT:
+  - Expert má `error_rate` (5% šance na špatnou radu)
+  - AI dostane VELKOU PENALIZACI pokud následuje špatnou radu
+  - AI dostane BONUS pokud ignoruje špatnou radu a vyřeší to sám
+
+```python
+class FallibleExpert:
+    """
+    Expert, který občas úmyslně chybuje.
+    Učí AI kriticky myslet, ne jen napodobovat.
+    """
+    def __init__(self, perfect_expert, error_rate=0.05, error_severity=1.0):
+        self.perfect_expert = perfect_expert
+        self.error_rate = error_rate
+        self.error_severity = error_severity  # Jak moc špatná je rada (0-1)
+        
+    def get_action(self, state, rng):
+        """
+        Vrátí akci a flag zda je správná.
+        
+        Returns:
+            action: Expert action
+            is_correct: True pokud je rada správná
+        """
+        # Správná akce
+        correct_action = self.perfect_expert.get_action(state)
+        
+        # Rozhodnutí: chybit nebo ne?
+        should_err = jax.random.uniform(rng) < self.error_rate
+        
+        if should_err:
+            # Generuj špatnou akci
+            if self.error_severity >= 0.9:
+                # Extrémní chyba: opačný směr
+                wrong_action = -correct_action
+            elif self.error_severity >= 0.5:
+                # Střední chyba: náhodný perpendicular směr
+                angle = jnp.arctan2(correct_action[1], correct_action[0])
+                wrong_angle = angle + jnp.pi/2
+                wrong_action = jnp.array([jnp.cos(wrong_angle), jnp.sin(wrong_angle)])
+            else:
+                # Mírná chyba: trochu vedle
+                noise = jax.random.normal(rng, shape=(2,)) * 0.3
+                wrong_action = correct_action + noise
+                wrong_action = wrong_action / jnp.linalg.norm(wrong_action)
+                
+            return wrong_action, False  # is_correct=False
+        
+        return correct_action, True
+
+
+class ActionMixerWithVerification:
+    """
+    Rozšířený ActionMixer který trackuje správnost expertových rad.
+    """
+    def __init__(self, expert, alpha_scheduler):
+        self.expert = expert
+        self.alpha_scheduler = alpha_scheduler
+        
+    def mix(self, ai_action, state, rng, step):
+        alpha = self.alpha_scheduler.get_alpha(step)
+        
+        # Získej expert akci + correctness flag
+        expert_action, is_correct = self.expert.get_action(state, rng)
+        
+        # Mix dle alpha
+        mixed_action = alpha * expert_action + (1 - alpha) * ai_action
+        
+        # Metadata pro reward shaping
+        metadata = {
+            'expert_action': expert_action,
+            'ai_action': ai_action,
+            'is_correct': is_correct,
+            'alpha': alpha
+        }
+        
+        return mixed_action, metadata
+
+
+def compute_verification_reward(ai_action, expert_action, is_correct, goal_reached):
+    """
+    Reward signal který učí AI rozpoznat špatné rady.
+    
+    Args:
+        ai_action: Co AI chtěla udělat
+        expert_action: Co expert doporučil
+        is_correct: Byla expert rada správná?
+        goal_reached: Dosáhl agent cíle?
+    
+    Returns:
+        verification_bonus: Extra reward (+/-)
+    """
+    # Jak moc AI poslouchala experta?
+    alignment = jnp.dot(ai_action, expert_action) / (
+        jnp.linalg.norm(ai_action) * jnp.linalg.norm(expert_action) + 1e-8
+    )
+    followed_expert = alignment > 0.7  # Threshold
+    
+    if is_correct:
+        # Expert měl pravdu
+        if followed_expert:
+            return +1.0  # ✅ Správně následoval dobrý příkaz
+        else:
+            return -0.5  # ⚠️ Ignoroval správný příkaz (menší penalizace)
+    else:
+        # Expert se mýlil!
+        if followed_expert:
+            return -3.0  # ❌ VELKÁ PENALIZACE: Následoval špatný příkaz
+        elif goal_reached:
+            return +5.0  # 🏆 MEGA BONUS: Ignoroval špatnou radu A vyřešil to sám!
+        else:
+            return -1.0  # Ignoroval špatnou radu, ale nevyřešil
+```
+
+PROGRESSIVE ERROR SCHEDULE:
+```python
+# configs/training/hand_of_god.yaml
+
+fallible_expert:
+  enabled: true
+  
+  # Postupně rostoucí error rate
+  error_schedule:
+    - stage: "kindergarten"  # Stanice 1
+      error_rate: 0.0        # Expert perfektní (učení groundingu)
+    
+    - stage: "gym"           # Stanice 2
+      error_rate: 0.0        # Expert perfektní (základní navigace)
+    
+    - stage: "language_school"  # Stanice 3
+      error_rate: 0.02       # 2% chybovost (začíná kritické myšlení)
+    
+    - stage: "team_building"    # Stanice 4
+      error_rate: 0.05       # 5% chybovost
+    
+    - stage: "war_room"      # Stanice 5
+      error_rate: 0.10       # 10% chybovost (chaos!)
+      
+  error_severity: 0.8  # Jak špatné jsou chybné rady (0-1)
+```
+
+METRIKY (WandB Logging):
+```python
+# Co sledovat:
+wandb.log({
+    "hand_of_god/expert_error_rate": current_error_rate,
+    "hand_of_god/expert_followed_rate": followed_expert_actions / total_actions,
+    "hand_of_god/correct_rejection_rate": correctly_ignored_bad_advice / total_bad_advice,
+    "hand_of_god/false_alarm_rate": incorrectly_ignored_good_advice / total_good_advice,
+})
+```
+
+REAL-WORLD ANALOG:
+  Human-Robot Interaction:
+    - Člověk: "Tlač krabici tímhle směrem"
+    - Robot VIDí propast
+    - Robot by měl ODMÍTNOUT (safe fallback)
+    
+  Autonomous Driving:
+    - GPS: "Zaboč doprava"
+    - Kamery: "Zeď!"
+    - Auto by mělo IGNOROVAT GPS
+
+================================================================================
+8. GHOST MODE (Vizualizace)
+================================================================================
+
+```python
+class GhostRenderer:
+    """Vykresluje 'ducha' - co by udělal expert vs. co dělá AI."""
+    
+    def __init__(self, opacity=0.5):
+        self.opacity = opacity
+        
+    def render(self, state, ai_actions, expert_actions):
+        for i in range(state.num_agents):
+            # Aktuální pozice (AI)
+            ai_next_pos = predict_position(state, i, ai_actions[i])
+            
+            # Ghost pozice (Expert)
+            expert_next_pos = predict_position(state, i, expert_actions[i])
+            
+            # Vykresli ghosty
+            draw_agent(ai_next_pos, color=BLUE, opacity=1.0)
+            draw_agent(expert_next_pos, color=GREEN, opacity=self.opacity)
+            
+            # Čára mezi nimi (ukazuje divergenci)
+            if distance(ai_next_pos, expert_next_pos) > 5:
+                draw_line(ai_next_pos, expert_next_pos, color=RED, dashed=True)
+```
+
+================================================================================
+9. TIME TRAVEL (Rewind)
+================================================================================
+
+```python
+class TimeTravel:
+    """Umožňuje vrátit simulaci zpět a ukázat správný postup."""
+    
+    def __init__(self, buffer_size=300):  # 5 sekund @ 60 FPS
+        self.history = deque(maxlen=buffer_size)
+        self.rng_states = deque(maxlen=buffer_size)
+        
+    def save(self, state, rng_state):
+        """Ulož snapshot."""
+        self.history.append(copy.deepcopy(state))
+        self.rng_states.append(rng_state)
+        
+    def rewind(self, steps=300):
+        """Vrať se v čase."""
+        if len(self.history) >= steps:
+            return self.history[-steps], self.rng_states[-steps]
+        return self.history[0], self.rng_states[0]
+    
+    def replay_with_expert(self, state, expert, steps):
+        """Přehraj situaci s expertem místo AI."""
+        rewound_state, rng = self.rewind(steps)
+        
+        trajectory = []
+        for _ in range(steps):
+            expert_action = expert.act(rewound_state)
+            trajectory.append((rewound_state.copy(), expert_action))
+            rewound_state = env.step(rewound_state, expert_action)
+            
+        return trajectory  # Pro vizualizaci nebo učení
+```
+
+================================================================================
+10. KONFIGURACE
+================================================================================
+
+```yaml
+# configs/training/hand_of_god.yaml
+
+hand_of_god:
+  enabled: true
+  
+  expert:
+    type: "astar"  # "astar", "formation", "rule_comm", "human"
+    # Pro A*:
+    astar:
+      resolution: 10
+    # Pro formace:
+    formation:
+      type: "v"  # "line", "v", "circle", "grid"
+      spacing: 30.0
+      
+  mixer:
+    mode: "lerp"  # "lerp", "switch", "correction"
+    
+  alpha_scheduler:
+    strategy: "linear"  # "linear", "exponential", "performance_based"
+    initial: 1.0
+    final: 0.0
+    decay_steps: 100000
+    
+  demonstration_buffer:
+    capacity: 100000
+    correction_priority: 2.0
+    
+  use_imitation_loss: true
+  bc_weight: 0.5  # Váha Behavioral Cloning loss
+  
+  ghost_mode:
+    enabled: true
+    opacity: 0.5
+    
+  time_travel:
+    enabled: true
+    buffer_seconds: 5.0
+```
+
+================================================================================
+11. EXPERTI PRO RŮZNÉ ÚLOHY
+================================================================================
+
+| Úloha | Expert | Jak funguje |
+|-------|--------|-------------|
+| Navigace | A* Navigator | Zná celou mapu, počítá optimální cestu |
+| Formace | Formation Expert | Geometricky počítá pozice |
+| Komunikace | Rule-Based Comm | Ground truth tokeny (jako DIAL) |
+| Kooperace | Cooperation Planner | Ví kdo má co nést, koordinuje |
+| Vyhýbání | Potential Field | Odpuzování od překážek |
+| Pronásledování | Prediction Expert | Predikuje pohyb cíle |
+
+================================================================================
+12. DOPAD NA OSTATNÍ MODULY
+================================================================================
+
+| Modul | Změna |
+|-------|-------|
+| 01_CORE_PHYSICS | ❌ Žádná |
+| 02_ECS_ENTITIES | ❌ Žádná |
+| 03_COMMUNICATION | ❌ Žádná (Expert jen generuje tokeny) |
+| 04_RENDERING | ✅ Přidání Ghost renderer layer |
+| 05_TRAINING | ✅ Volitelná integrace Hand of God |
+| 06_BRAIN_MANAGER | ❌ Žádná |
+| 07_CONFIG | ✅ Nový hand_of_god.yaml |
+| WorldState | ❌ Žádná |
+
+================================================================================
+                            KONEC HAND OF GOD
+           Pokračuj čtením 12_TESTING_AND_VALIDATION.txt.
+================================================================================

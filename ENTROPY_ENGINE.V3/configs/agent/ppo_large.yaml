@@ -1,0 +1,8 @@
+# @package agent
+
+defaults:
+  - ppo
+
+network:
+  hidden_dim: 512
+  num_layers: 4

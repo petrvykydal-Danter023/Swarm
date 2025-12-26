@@ -1,0 +1,324 @@
+================================================================================
+                    07_CONFIG_SYSTEM.txt
+                    Hydra Konfigurace a Experimenty
+================================================================================
+
+================================================================================
+1. PROČ HYDRA?
+================================================================================
+
+V2 PROBLÉM:
+  - Hyperparametry hardcodované v kódu
+  - argparse pro CLI = nepřehledné
+  - Spuštění experimentu = úprava .py souboru
+
+V3 S HYDRA:
+  - YAML soubory pro VŠECHNY konfigurace
+  - Hierarchické skládání (base + override)
+  - Automatické logování configu do WandB
+  - CLI overrides: `python train.py num_agents=100`
+
+================================================================================
+2. STRUKTURA KONFIGURAČNÍCH SOUBORŮ
+================================================================================
+
+```
+configs/
+├── config.yaml              # Hlavní vstupní bod
+├── env/
+│   ├── default.yaml         # Základní nastavení prostředí
+│   ├── easy.yaml            # Easy mode
+│   ├── hard.yaml            # Hard mode
+│   └── benchmark.yaml       # Pro měření výkonu
+├── agent/
+│   ├── ppo.yaml             # PPO hyperparametry
+│   ├── ppo_large.yaml       # Větší síť
+│   └── dial.yaml            # DIAL pretraining
+├── mission/
+│   ├── goal_finding.yaml    # Najdi cíl
+│   ├── resource_collect.yaml# Sbírej objekty
+│   └── team_battle.yaml     # Týmová hra
+├── render/
+│   ├── disabled.yaml        # Headless
+│   ├── vispy.yaml           # Vispy vizualizace
+│   └── dearimgui.yaml       # ImGui dashboard
+└── sweep/
+    ├── lr_sweep.yaml        # Sweep learning rate
+    └── architecture.yaml    # Sweep network sizes
+```
+
+================================================================================
+3. PŘÍKLADY YAML KONFIGURACÍ
+================================================================================
+
+config.yaml (Hlavní):
+```yaml
+# @package _global_
+
+defaults:
+  - env: default
+  - agent: ppo
+  - mission: goal_finding
+  - render: disabled
+  - _self_
+
+# Globální nastavení
+seed: 42
+experiment_name: "entropy_v3_test"
+output_dir: "outputs/${experiment_name}"
+
+# Trénink
+training:
+  total_timesteps: 1_000_000
+  log_interval: 1000
+  save_interval: 50_000
+  eval_interval: 10_000
+
+# Logging
+wandb:
+  enabled: true
+  project: "entropy-v3"
+  entity: null  # Váš WandB účet
+```
+
+env/default.yaml:
+```yaml
+# @package env
+
+num_agents: 5
+arena_width: 800
+arena_height: 600
+max_steps_per_episode: 1000
+dt: 0.1
+
+physics:
+  wheel_base: 20.0
+  max_speed: 100.0
+  agent_radius: 10.0
+
+sensors:
+  lidar_rays: 32
+  lidar_range: 300.0
+
+communication:
+  enabled: true
+  vocab_size: 32
+  payload_dim: 4
+  context_dim: 64
+```
+
+env/benchmark.yaml:
+```yaml
+# @package env
+
+# Inherit from default, override for stress test
+defaults:
+  - default
+
+num_agents: 1000
+arena_width: 2000
+arena_height: 2000
+max_steps_per_episode: 100  # Kratší pro benchmark
+```
+
+agent/ppo.yaml:
+```yaml
+# @package agent
+
+algorithm: "ppo"
+
+network:
+  hidden_dim: 256
+  num_layers: 2
+  activation: "relu"
+
+ppo:
+  learning_rate: 3e-4
+  num_steps: 2048
+  num_minibatches: 32
+  update_epochs: 10
+  gamma: 0.99
+  gae_lambda: 0.95
+  clip_coef: 0.2
+  ent_coef: 0.01
+  vf_coef: 0.5
+  max_grad_norm: 0.5
+```
+
+mission/goal_finding.yaml:
+```yaml
+# @package mission
+
+name: "goal_finding"
+description: "Agent must navigate to their assigned goal"
+
+rewards:
+  goal_reached: 10.0
+  distance_penalty_scale: 0.001  # Penalty per unit distance
+  collision_penalty: -0.1
+  step_penalty: -0.001
+
+curriculum:
+  enabled: true
+  stages:
+    - threshold: 0.3
+      goal_distance_max: 200
+    - threshold: 0.6
+      goal_distance_max: 400
+    - threshold: 0.9
+      goal_distance_max: 800
+```
+
+================================================================================
+4. HYDRA POUŽITÍ V KÓDU
+================================================================================
+
+```python
+import hydra
+from omegaconf import DictConfig, OmegaConf
+import wandb
+
+@hydra.main(version_base=None, config_path="configs", config_name="config")
+def main(cfg: DictConfig):
+    """Hlavní vstupní bod."""
+    
+    # Přístup ke konfiguraci
+    print(f"Training {cfg.env.num_agents} agents")
+    print(f"Using algorithm: {cfg.agent.algorithm}")
+    
+    # WandB init s configem
+    if cfg.wandb.enabled:
+        wandb.init(
+            project=cfg.wandb.project,
+            config=OmegaConf.to_container(cfg, resolve=True),
+            name=cfg.experiment_name
+        )
+    
+    # Vytvoř environment
+    env = create_env(cfg.env)
+    
+    # Vytvoř agenta
+    if cfg.agent.algorithm == "ppo":
+        agent = PPOAgent(cfg.agent)
+    elif cfg.agent.algorithm == "dial":
+        agent = DIALAgent(cfg.agent)
+    
+    # Trénuj
+    train(env, agent, cfg.training)
+    
+    wandb.finish()
+
+if __name__ == "__main__":
+    main()
+```
+
+================================================================================
+5. CLI OVERRIDES
+================================================================================
+
+```bash
+# Základní spuštění
+python train.py
+
+# Override počtu agentů
+python train.py env.num_agents=100
+
+# Použij hard mode
+python train.py env=hard
+
+# Kombinace
+python train.py env=hard agent=ppo_large training.total_timesteps=5_000_000
+
+# Multirun (automaticky projde kombinace)
+python train.py --multirun env.num_agents=10,50,100 agent.ppo.learning_rate=1e-3,3e-4,1e-4
+```
+
+================================================================================
+6. EXPERIMENT TRACKING
+================================================================================
+
+Hydra automaticky:
+1. Vytvoří složku `outputs/YYYY-MM-DD/HH-MM-SS/`
+2. Uloží `.hydra/config.yaml` (plný config)
+3. Uloží `.hydra/overrides.yaml` (co bylo změněno)
+4. Přesměruje stdout do `train.log`
+
+```
+outputs/
+└── 2024-12-24/
+    └── 15-30-00/
+        ├── .hydra/
+        │   ├── config.yaml
+        │   ├── overrides.yaml
+        │   └── hydra.yaml
+        ├── train.log
+        ├── checkpoints/
+        │   ├── step_50000.safetensors
+        │   └── step_100000.safetensors
+        └── videos/
+            └── eval_episode_0.mp4
+```
+
+================================================================================
+7. SWEEPS (Hyperparameter Search)
+================================================================================
+
+sweep/lr_sweep.yaml:
+```yaml
+# WandB Sweep config
+method: bayes  # random, grid, bayes
+metric:
+  name: reward_mean
+  goal: maximize
+parameters:
+  agent.ppo.learning_rate:
+    min: 0.00001
+    max: 0.01
+    distribution: log_uniform_values
+  agent.ppo.ent_coef:
+    values: [0.0, 0.001, 0.01, 0.1]
+  agent.network.hidden_dim:
+    values: [64, 128, 256, 512]
+```
+
+Spuštění:
+```bash
+wandb sweep configs/sweep/lr_sweep.yaml
+wandb agent <sweep_id>
+```
+
+================================================================================
+8. SCHEMA VALIDACE
+================================================================================
+
+```python
+from dataclasses import dataclass
+from omegaconf import MISSING
+
+@dataclass
+class EnvConfig:
+    num_agents: int = 5
+    arena_width: int = 800
+    arena_height: int = 600
+    max_steps: int = 1000
+
+@dataclass
+class TrainingConfig:
+    total_timesteps: int = MISSING  # Povinné pole
+    log_interval: int = 1000
+
+@dataclass
+class Config:
+    env: EnvConfig = EnvConfig()
+    training: TrainingConfig = TrainingConfig()
+
+# Hydra automaticky validuje YAML proti schématu
+from hydra.core.config_store import ConfigStore
+cs = ConfigStore.instance()
+cs.store(name="config_schema", node=Config)
+```
+
+================================================================================
+                            KONEC CONFIG
+           Pokračuj čtením 08_MIGRATION_FROM_V2.txt pro migraci.
+================================================================================

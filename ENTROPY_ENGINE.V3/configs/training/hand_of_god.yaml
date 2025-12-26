@@ -1,0 +1,24 @@
+# @package training
+
+hand_of_god:
+  enabled: true
+  
+  expert:
+    type: "navigator" # "navigator", "formation", "fallible"
+    
+  fallible:
+    error_rate: 0.1
+    severity: 1.0
+    
+  mixer:
+    mode: "lerp"      # "lerp" only for now
+    
+  alpha_scheduler:
+    strategy: "linear"
+    initial: 1.0
+    final: 0.0
+    decay_steps: 500000
+    
+  ghost_mode:
+    enabled: true
+    opacity: 0.5

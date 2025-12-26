@@ -1,0 +1,178 @@
+================================================================================
+EVENT-TRIGGERED COMMUNICATION (Surprise Gating) - Implementation Plan
+================================================================================
+
+GOAL:
+Agent vysílá zprávu JEN když je překvapen (senzory neodpovídají predikci).
+Snižuje redundanci, zvyšuje hodnotu každé zprávy.
+
+================================================================================
+1. CONFIGURATION CHANGES
+================================================================================
+
+File: entropy/config.py
+
+Add to CommConfig:
+    surprise_gating: bool = False
+    surprise_threshold: float = 0.3   # Prediction error threshold
+    info_gain_reward: float = 0.1     # Reward for useful messages
+    spam_counterfactual_penalty: float = -0.05  # Penalty for ignored messages
+
+================================================================================
+2. WORLD MODEL (PREDICTOR)
+================================================================================
+
+File: NEW - entropy/brain/world_model.py
+
+Purpose: Agent predicts next observation based on current obs + action.
+
+    class WorldModelPredictor(nn.Module):
+        hidden_dim: int = 128
+        
+        @nn.compact
+        def __call__(self, obs, action):
+            x = jnp.concatenate([obs, action], axis=-1)
+            x = nn.Dense(self.hidden_dim)(x)
+            x = nn.relu(x)
+            predicted_next_obs = nn.Dense(obs.shape[-1])(x)
+            return predicted_next_obs
+    
+    def compute_surprise(predicted_obs, actual_obs):
+        error = jnp.abs(predicted_obs - actual_obs)
+        surprise = jnp.mean(error, axis=-1)  # Scalar per agent
+        return surprise
+
+================================================================================
+3. GATING LOGIC CHANGES
+================================================================================
+
+File: entropy/core/comms_router.py OR entropy/training/env_wrapper.py
+
+Current Gating:
+    is_speaking = sigmoid(gate_logit) > threshold
+
+Proposed Gating:
+    # 1. Compute surprise
+    surprise = compute_surprise(predicted_obs, actual_obs)
+    
+    # 2. Gate is modulated by surprise
+    surprise_gate = surprise > surprise_threshold
+    learned_gate = sigmoid(gate_logit) > 0.5
+    
+    # 3. Final decision: must be surprised AND want to speak
+    is_speaking = surprise_gate & learned_gate
+
+================================================================================
+4. REWARD SHAPING (Information Gain)
+================================================================================
+
+File: entropy/training/env_wrapper.py (_compute_rewards)
+
+Add new reward terms:
+
+    def compute_info_gain_reward(sender_id, receiver_ids, actions_with_msg, actions_without_msg):
+        """
+        Counterfactual: What would receiver have done without the message?
+        This requires running the policy twice (expensive) OR using approximation.
+        """
+        # Approximation: If receiver's action changed significantly after message
+        action_diff = jnp.linalg.norm(
+            actions_with_msg[receiver_ids] - previous_actions[receiver_ids], 
+            axis=-1
+        )
+        
+        message_was_useful = action_diff > 0.1
+        
+        r_info_gain = jnp.where(
+            is_speaking[sender_id] & message_was_useful,
+            cfg.comm.info_gain_reward,
+            0.0
+        )
+        
+        r_spam = jnp.where(
+            is_speaking[sender_id] & ~message_was_useful,
+            cfg.comm.spam_counterfactual_penalty,
+            0.0
+        )
+        
+        return r_info_gain + r_spam
+
+SIMPLIFIED VERSION (Recommended for V1):
+    - Track receiver's action BEFORE and AFTER receiving message
+    - If action changed: +reward to sender
+    - If action same: -penalty to sender (or no penalty initially)
+
+================================================================================
+5. TRAINING LOOP CHANGES
+================================================================================
+
+File: train_master.py
+
+Changes:
+    1. Initialize WorldModelPredictor alongside Actor/Critic
+    2. In rollout: Store predicted_obs, compute surprise
+    3. Train world model on (obs, action) -> next_obs pairs
+    4. Use surprise for gating
+
+    # In rollout_scan_fn:
+    predicted_obs = world_model.apply(world_model_params, obs, action)
+    
+    # After step:
+    surprise = compute_surprise(predicted_obs, next_obs)
+    
+    # Store for gating:
+    step_data['surprise'] = surprise
+
+================================================================================
+6. VERIFICATION PLAN
+================================================================================
+
+Test 1: Surprise Calculation
+    - Static world: Surprise should be low (agent predicts correctly)
+    - Dynamic event: Surprise spikes when something unexpected happens
+
+Test 2: Communication Rate
+    - With surprise_gating=True: Expect 50-80% fewer messages
+    - Messages should cluster around "interesting" events
+
+Test 3: Information Value
+    - Track: "Did receiver change behavior after message?"
+    - Baseline vs Surprise-Gated: Info gain per message should increase
+
+================================================================================
+7. ESTIMATED EFFORT
+================================================================================
+
+- World Model:           2 hours (simple MLP predictor)
+- Gating integration:    1-2 hours
+- Reward shaping:        2-3 hours (counterfactual is tricky)
+- Training loop:         1 hour
+- Testing:               2 hours
+
+TOTAL: ~8-10 hours (most complex of the 4)
+
+================================================================================
+8. DEPENDENCIES
+================================================================================
+
+- Requires: Spatial Communication (DONE)
+- Requires: Gating mechanism (DONE)
+- Optional: World Model can be shared with planning module later
+
+================================================================================
+9. SIMPLIFICATION OPTIONS
+================================================================================
+
+If full counterfactual is too complex:
+
+OPTION A: Delta-Based Surprise (Simpler)
+    - Agent sends if |obs_t - obs_{t-1}| > threshold
+    - No world model needed, just sensor delta
+
+OPTION B: Novelty-Based (Medium)
+    - Train world model, use prediction error
+    - Skip counterfactual reward (just use surprise for gating)
+
+RECOMMENDATION: Start with Option B, add counterfactual later.
+
+================================================================================

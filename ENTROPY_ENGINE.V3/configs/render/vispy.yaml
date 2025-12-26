@@ -1,0 +1,9 @@
+# @package render
+
+enabled: true
+backend: "vispy"
+fps: 60
+show_debug: true
+show_velocities: true
+show_lidars: false
+show_rewards: true
