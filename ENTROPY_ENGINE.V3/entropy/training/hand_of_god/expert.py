@@ -269,3 +269,51 @@ class GhostRenderer:
             'opacity': self.opacity
         }
 
+
+class IntentNavigator(ExpertPolicy):
+    """
+    Expert for Hybrid Mode (Intent-Based).
+    Outputs INTENT vectors instead of MOTOR commands.
+    
+    Target Intent Space: [IntentID, Param1, Param2, ...]
+    - IntentID > 0.0 -> Target Mode
+    - Param1 = RelX (normalized)
+    - Param2 = RelY (normalized)
+    """
+    def __init__(self, num_agents: int):
+        self.num_agents = num_agents
+        
+    def act(self, state, rng: jax.Array) -> jnp.ndarray:
+        # Calculate target relative to agent
+        diff = state.goal_positions - state.agent_positions
+        
+        # Transform global diff to local (body) frame
+        # So Param1 is "Forward Distance", Param2 is "Right Distance"
+        # Inverse rotation by agent angle
+        angles = state.agent_angles
+        cos_a = jnp.cos(-angles)
+        sin_a = jnp.sin(-angles)
+        
+        local_x = diff[:, 0] * cos_a - diff[:, 1] * sin_a
+        local_y = diff[:, 0] * sin_a + diff[:, 1] * cos_a
+        
+        # Normalize to unit vector [-1, 1]
+        # This tells the PID controller the DIRECTION to the target,
+        # but keeps input magnitude stable for the Neural Network.
+        local_dist = jnp.sqrt(local_x**2 + local_y**2) + 1e-6
+        norm_x = local_x / local_dist
+        norm_y = local_y / local_dist
+        
+        # Construct Action Vector
+        # [IntentID(Target), Param1, Param2]
+        
+        # IntentID > 0 for Target Mode. Let's use 1.0.
+        ids = jnp.ones((self.num_agents, 1))
+        
+        # Params
+        p1 = norm_x.reshape(-1, 1)
+        p2 = norm_y.reshape(-1, 1)
+        
+        intent_core = jnp.concatenate([ids, p1, p2], axis=1)
+        return intent_core
+

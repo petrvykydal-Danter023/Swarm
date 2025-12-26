@@ -68,6 +68,15 @@ class WorldState:
     agent_is_leader: jnp.ndarray      # [N] bool
     squad_centroids: jnp.ndarray      # [MaxSquads, 2]
 
+    # === SAFETY: Token Bucket ===
+    safety_tokens: jnp.ndarray        # [N]
+    safety_last_refill: jnp.ndarray   # [N]
+
+    # === SAFETY: Watchdog ===
+    safety_watchdog_pos_old: jnp.ndarray  # [N, 2]
+    safety_watchdog_steps: int            # scalar
+    safety_watchdog_walk: jnp.ndarray     # [N]
+
     @property
     def num_agents(self) -> int:
         return self.agent_positions.shape[0]
@@ -132,6 +141,13 @@ def create_initial_state(
         pheromone_ttls=jnp.zeros(max_pheromones, dtype=jnp.int32),
         pheromone_valid=jnp.zeros(max_pheromones, dtype=bool),
         pheromone_write_ptr=0,
+        
+        # Safety
+        safety_tokens=jnp.full(num_agents, 5.0),
+        safety_last_refill=jnp.zeros(num_agents), # Will be staggered in env_wrapper or init
+        safety_watchdog_pos_old=jnp.zeros((num_agents, 2)),
+        safety_watchdog_steps=0,
+        safety_watchdog_walk=jnp.zeros(num_agents, dtype=jnp.int32),
         
         timestep=0,
         dt=dt,

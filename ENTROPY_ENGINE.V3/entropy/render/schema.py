@@ -44,6 +44,17 @@ class RenderFrame:
     agent_squad_ids: Optional[np.ndarray] = None      # [N] int squad index
     agent_is_leader: Optional[np.ndarray] = None      # [N] bool
     
+    # Safety Visualization
+    safety_enabled: bool = False
+    safety_radius: float = 30.0
+    safety_repulsion_radius: float = 25.0
+    geofence_zones: Optional[List] = None             # List of zone dicts
+    
+    # Intent Visualization
+    intent_enabled: bool = False
+    agent_intents: Optional[np.ndarray] = None        # [N, D] Raw intent vector
+    intent_targets: Optional[np.ndarray] = None       # [N, 2] computed target (debug)
+    
     def to_dict(self):
         """Helper for serialization if needed."""
         return self.__dict__

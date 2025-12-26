@@ -93,7 +93,19 @@ class Recorder:
                 pheromone_radius=50.0,
                 # Hierarchy Visualization
                 agent_squad_ids=np.array(state.agent_squad_ids) if hasattr(state, 'agent_squad_ids') else None,
-                agent_is_leader=np.array(state.agent_is_leader) if hasattr(state, 'agent_is_leader') else None
+                agent_is_leader=np.array(state.agent_is_leader) if hasattr(state, 'agent_is_leader') else None,
+                
+                # Safety & Intent Visualization
+                safety_enabled=env_wrapper.safety_cfg.enabled if hasattr(env_wrapper, 'safety_cfg') and env_wrapper.safety_cfg else False,
+                safety_radius=env_wrapper.safety_cfg.safety_radius if hasattr(env_wrapper, 'safety_cfg') and env_wrapper.safety_cfg else 30.0,
+                safety_repulsion_radius=env_wrapper.safety_cfg.repulsion_radius if hasattr(env_wrapper, 'safety_cfg') and env_wrapper.safety_cfg else 25.0,
+                geofence_zones=None, # Populate if zones exist in world or config
+                
+                intent_enabled=env_wrapper.intent_cfg.enabled if hasattr(env_wrapper, 'intent_cfg') and env_wrapper.intent_cfg else False,
+                # Would need to capture raw intents from somewhere if we want to viz them here, 
+                # but actions passed to step() are already motor actions in Direct mode?
+                # Actually, in Intent mode, actions ARE intents. So we can visualize them.
+                agent_intents=np.array(actions) if (hasattr(env_wrapper, 'intent_cfg') and env_wrapper.intent_cfg and env_wrapper.intent_cfg.enabled) else None
             )
             
             # Render to Image
@@ -117,6 +129,6 @@ class Recorder:
         # Convert BGR (OpenCV) to RGB (ImageIO)
         rgb_frames = [cv2.cvtColor(f, cv2.COLOR_BGR2RGB) for f in frames] if HAS_CV2 else frames
         
-        imageio.mimsave(save_path, rgb_frames, fps=self.fps, loop=0)
+        imageio.mimsave(save_path, rgb_frames, fps=self.fps)
         return save_path
 

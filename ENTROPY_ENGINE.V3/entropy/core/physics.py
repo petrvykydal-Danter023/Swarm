@@ -171,6 +171,13 @@ def physics_step(state: WorldState, actions: jnp.ndarray, wheel_base: float = 20
         object_types=state.object_types,
         object_carried_by=state.object_carried_by,
         
+        # Safety (Pass-through)
+        safety_tokens=state.safety_tokens,
+        safety_last_refill=state.safety_last_refill,
+        safety_watchdog_pos_old=state.safety_watchdog_pos_old,
+        safety_watchdog_steps=state.safety_watchdog_steps,
+        safety_watchdog_walk=state.safety_watchdog_walk,
+        
         timestep=state.timestep + 1,
         dt=state.dt,
         arena_size=state.arena_size

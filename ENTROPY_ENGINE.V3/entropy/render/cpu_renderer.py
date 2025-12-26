@@ -136,6 +136,75 @@ class CPURenderer:
                             # Small "spark" at target
                             cv2.circle(img, p2, int(5 * self.scale), (255, 0, 255), -1)
 
+        # 3.5 Draw Safety & Intent Overlays
+        # A) Safety Radius
+        if hasattr(frame, 'safety_enabled') and frame.safety_enabled and frame.agent_positions is not None:
+             overlay_safety = img.copy()
+             for i, pos in enumerate(frame.agent_positions):
+                 center = to_pix(pos)
+                 
+                 # Safety Radius (Dashed or Solid Yellow Ring)
+                 r_safe = int(frame.safety_radius * self.scale)
+                 cv2.circle(overlay_safety, center, r_safe, (0, 200, 255), 1)
+                 
+                 # Repulsion Radius (Red Ring)
+                 r_rep = int(frame.safety_repulsion_radius * self.scale)
+                 cv2.circle(overlay_safety, center, r_rep, (0, 0, 255), 1)
+
+             # Blend
+             alpha_safe = 0.5
+             img = cv2.addWeighted(overlay_safety, alpha_safe, img, 1 - alpha_safe, 0)
+
+        # B) Intent Vectors
+        if hasattr(frame, 'intent_enabled') and frame.intent_enabled and frame.agent_intents is not None:
+             for i, pos in enumerate(frame.agent_positions):
+                 center = to_pix(pos)
+                 intent = frame.agent_intents[i]
+                 
+                 # Intent Vector Logic based on intent type
+                 # [0]: Type (<0 Vel, >0 Target)
+                 # [1]: P1 (V or RelX)
+                 # [2]: P2 (Omega or RelY)
+                 
+                 intent_type = intent[0]
+                 p1 = intent[1]
+                 p2 = intent[2]
+                 
+                 if intent_type > 0: # Target Mode
+                     # Draw Target Vector (Green Arrow)
+                     # p1=RelX, p2=RelY. Relative to agent orientation?
+                     # Step logic assumes relative to agent BODY.
+                     # We need agent angle to project to world space.
+                     angle = frame.agent_angles[i]
+                     cos_a = np.cos(angle)
+                     sin_a = np.sin(angle)
+                     
+                     # Rotate rel vector (p1, p2) by agent angle
+                     # x_world = x_rel * cos - y_rel * sin
+                     # y_world = x_rel * sin + y_rel * cos
+                     vec_x = p1 * cos_a - p2 * sin_a
+                     vec_y = p1 * sin_a + p2 * cos_a
+                     
+                     # Scale for visibility? (Intents might be large)
+                     # Just draw target point
+                     target_pos = (pos[0] + vec_x, pos[1] + vec_y)
+                     target_pix = to_pix(target_pos)
+                     
+                     cv2.arrowedLine(img, center, target_pix, (0, 200, 0), 2, tipLength=0.2)
+                     cv2.circle(img, target_pix, int(4 * self.scale), (0, 200, 0), -1)
+                     
+                 else: # Velocity Mode
+                     # Draw Velocity Vector (Blue Arrow)
+                     # p1=V, p2=Omega
+                     v = p1 * 50.0 # Scale for viz
+                     
+                     end_pos = (
+                         pos[0] + np.cos(frame.agent_angles[i]) * v,
+                         pos[1] + np.sin(frame.agent_angles[i]) * v
+                     )
+                     end_pix = to_pix(end_pos)
+                     cv2.arrowedLine(img, center, end_pix, (255, 0, 0), 2, tipLength=0.2)
+
         # Helper for unique colors/IDs
         def get_color(idx, total):
             # Gentle variation

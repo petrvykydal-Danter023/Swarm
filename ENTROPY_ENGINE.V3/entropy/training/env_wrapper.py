@@ -17,6 +17,14 @@ from entropy.brain.communication import (
     Token
 )
 
+# Safety Layer imports (top-level for JIT optimization)
+from entropy.safety.reflexes import apply_collision_reflex
+from entropy.safety.geofence import apply_geofence
+from entropy.safety.comm_limiter import apply_comm_limit, TokenBucketState
+from entropy.safety.watchdog import apply_watchdog, WatchdogState
+from entropy.safety.intent import process_intent
+from entropy.safety.metrics import compute_safety_metrics
+
 class EntropyGymWrapper:
     """
     JAX-compatible environment wrapper for PPO.
@@ -67,6 +75,18 @@ class EntropyGymWrapper:
             self.lidar_rays = cfg.agent.lidar_rays
             self.reward_cfg = cfg.reward
             self.shared_goal = cfg.reward.shared_goal
+            self.safety_cfg = cfg.safety if hasattr(cfg, 'safety') else None
+            self.intent_cfg = cfg.intent if hasattr(cfg, 'intent') else None
+            
+            # Action space adjustment for Intent Mode
+            # Direct: [MotL, MotR, Gate, ...]
+            # Intent: [Type, P1, P2, Gate, ...] -> +1 Dimension (Type)
+            # Actually, MotL/MotR are replaced by Type/P1/P2.
+            # Direct: 2 + Rest
+            # Intent: 3 + Rest
+            if self.intent_cfg and self.intent_cfg.enabled:
+                self.action_dim += 1 # 2 params replace 2 motors, +1 for type
+
             
         else:
             # Legacy Config
@@ -123,11 +143,20 @@ class EntropyGymWrapper:
             goals = jnp.tile(single_goal, (self.num_agents, 1))
         else:
             goals = jax.random.uniform(goal_rng, (self.num_agents, 2)) * jnp.array(self.arena_size)
+
+        # Initialize Safety State (Staggered Tokens)
+        last_refill = jnp.zeros(self.num_agents)
+        if hasattr(self, 'safety_cfg') and self.safety_cfg and self.safety_cfg.enabled:
+             # Stagger over window
+             rng, stagger_rng = jax.random.split(rng)
+             offsets = jax.random.randint(stagger_rng, (self.num_agents,), 0, self.safety_cfg.msg_rate_window)
+             last_refill = -offsets.astype(jnp.float32)
         
         state = state.replace(
             agent_positions=positions,
             agent_angles=angles,
-            goal_positions=goals
+            goal_positions=goals,
+            safety_last_refill=last_refill
         )
         
         # Initial Obs
@@ -155,8 +184,70 @@ class EntropyGymWrapper:
         rng: jax.Array
     ) -> Tuple[WorldState, jnp.ndarray, jnp.ndarray, jnp.ndarray, Dict]:
         
+        # ========== 0. INTENT TRANSLATION (Phase 2) ==========
+        # Convert High-Level Intent -> Low-Level Motor Actions
+        # BEFORE Safety Layer (Safety checks the MOTOR outputs)
+        motor_actions_raw = actions
+        if hasattr(self, 'intent_cfg') and self.intent_cfg and self.intent_cfg.enabled:
+             motor_actions_raw = process_intent(state, actions, self.intent_cfg)
+        
+        # ========== SAFETY LAYER ==========
+        safe_actions = motor_actions_raw
+        if hasattr(self, 'safety_cfg') and self.safety_cfg and self.safety_cfg.enabled:
+            # 1. Override Check
+            override_mask = None
+            if self.safety_cfg.allow_ai_override and actions.shape[-1] > self.base_action_dim if hasattr(self, 'base_action_dim') else False:
+                 pass
+
+            # 2. Collision Reflex (Squad-Aware & Local)
+            safe_actions = apply_collision_reflex(state, safe_actions, self.safety_cfg)
+            
+            # 3. Geo-Fence
+            if self.safety_cfg.geofence_enabled:
+                 safe_actions = apply_geofence(state, safe_actions, [], self.safety_cfg)
+
+            # 4. Watchdog (Anti-Stalemate)
+            if self.safety_cfg.watchdog_enabled:
+                wd_state = WatchdogState(
+                    position_old=state.safety_watchdog_pos_old,
+                    steps_since_snapshot=state.safety_watchdog_steps,
+                    random_walk_remaining=state.safety_watchdog_walk
+                )
+                rng, wd_rng = jax.random.split(rng)
+                safe_actions, new_wd = apply_watchdog(state, safe_actions, wd_state, self.safety_cfg, wd_rng)
+                
+                # Update Watchdog State in WorldState
+                state = state.replace(
+                    safety_watchdog_pos_old=new_wd.position_old,
+                    safety_watchdog_steps=new_wd.steps_since_snapshot,
+                    safety_watchdog_walk=new_wd.random_walk_remaining
+                )
+            
+            # 5. Comm Limiter (Staggered)
+            # Only if comms are used (gate is index 2)
+            if self.use_comms:
+                tb_state = TokenBucketState(
+                    tokens=state.safety_tokens,
+                    last_refill=state.safety_last_refill
+                )
+                safe_actions, new_tb = apply_comm_limit(state, safe_actions, tb_state, self.safety_cfg)
+                
+                state = state.replace(
+                    safety_tokens=new_tb.tokens,
+                    safety_last_refill=new_tb.last_refill
+                )
+        
+        # Calculate Safety Metrics (Telemetry)
+        safety_stats = {}
+        if hasattr(self, 'safety_cfg') and self.safety_cfg and self.safety_cfg.log_metrics:
+            metrics = compute_safety_metrics(motor_actions_raw, safe_actions, state, self.safety_cfg)
+            safety_stats = metrics.to_dict()
+                
+        # Use SAFE actions for physics and logic
+        final_actions = safe_actions
+
         # 1. Physics Step (Only use motor actions)
-        motor_actions = actions[:, :2]
+        motor_actions = final_actions[:, :2]
         next_state = physics_step(state, motor_actions)
         
         # 2. Communication Step (Compute Inboxes)
@@ -166,7 +257,7 @@ class EntropyGymWrapper:
             
             inbox_msgs, inbox_meta, inbox_mask = route_messages(
                 state.agent_positions,
-                actions,
+                final_actions,
                 self.comm_cfg,
                 rng,
                 squad_ids=state.agent_squad_ids,
@@ -184,17 +275,17 @@ class EntropyGymWrapper:
                 # ... (Keep existing logic if needed, or simply assume it runs as part of loop)
                 # Re-inserting Pheromone loop logic here for completeness as per previous state
                 place_threshold = 2.0
-                channel_logits = actions[:, 3]
+                channel_logits = final_actions[:, 3]
                 is_placing = channel_logits > place_threshold
                 
-                addr_angle = actions[:, 4] * jnp.pi
-                addr_dist = jax.nn.softplus(actions[:, 5])
+                addr_angle = final_actions[:, 4] * jnp.pi
+                addr_dist = jax.nn.softplus(final_actions[:, 5])
                 
                 target_vec_x = jnp.cos(addr_angle) * addr_dist
                 target_vec_y = jnp.sin(addr_angle) * addr_dist
                 target_points = state.agent_positions + jnp.stack([target_vec_x, target_vec_y], axis=1)
                 
-                comm_msgs = actions[:, 6:] 
+                comm_msgs = final_actions[:, 6:] 
                 p_dim = self.comm_cfg.pheromone_dim
                 p_msgs = comm_msgs[:, :p_dim]
                 
@@ -250,7 +341,7 @@ class EntropyGymWrapper:
         obs = self._get_obs(next_state, inbox_msgs, inbox_meta, inbox_mask)
         
         # 4. Compute Rewards
-        rewards = self._compute_rewards(next_state, actions)
+        rewards = self._compute_rewards(next_state, final_actions)
         
         # 5. Check Termination
         timeout = next_state.timestep >= self.max_steps
@@ -258,7 +349,10 @@ class EntropyGymWrapper:
         
         info = {
             "goal_reached": next_state.goal_reached.astype(jnp.float32),
-            "max_steps": jnp.full((self.num_agents,), timeout, dtype=jnp.float32)
+            "max_steps": jnp.full((self.num_agents,), timeout, dtype=jnp.float32),
+            # Add safety stats (broadcasted or single val?)
+            # Metrics are scalar sums (int). Put them in info.
+            **{k: jnp.array(v, dtype=jnp.float32) for k, v in safety_stats.items()}
         }
         
         return next_state, obs, rewards, dones, info
@@ -322,6 +416,7 @@ class EntropyGymWrapper:
         w_dist = self.reward_cfg.w_dist if self.reward_cfg else 1.0
         w_reach = self.reward_cfg.w_reach if self.reward_cfg else 10.0
         w_energy = self.reward_cfg.w_energy if self.reward_cfg else -0.01
+        w_living = self.reward_cfg.w_living_penalty if self.reward_cfg and hasattr(self.reward_cfg, 'w_living_penalty') else -0.001
         
         # 1. Progress to Goal
         dist = jnp.linalg.norm(state.agent_positions - state.goal_positions, axis=1)
@@ -335,11 +430,16 @@ class EntropyGymWrapper:
         motor_actions = actions[:, :2]
         r_energy = jnp.mean(jnp.abs(motor_actions), axis=1) * w_energy
         
-        # 4. Bandwidth Penalty (Communication)
+        # 4. Living Penalty (Time Pressure)
+        # Penalize every step where agent is NOT at goal
+        not_at_goal = ~state.goal_reached
+        r_living = not_at_goal.astype(jnp.float32) * w_living
+        
+        # 5. Bandwidth Penalty (Communication)
         if self.use_comms and state.agent_messages.shape[-1] >= 32:
              tokens = jnp.argmax(state.agent_messages[:, :32], axis=1)
              r_bandwidth = compute_bandwidth_penalty(tokens, Token.SILENCE, penalty=-0.01)
         else:
              r_bandwidth = 0.0
              
-        return r_dist + r_reached + r_energy + r_bandwidth
+        return r_dist + r_reached + r_energy + r_living + r_bandwidth
