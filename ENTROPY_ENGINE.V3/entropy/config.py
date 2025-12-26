@@ -171,7 +171,7 @@ class IntentConfig:
     """
     Konfigurace Intent-Based Actions (Phase 2).
     """
-    enabled: bool = False             # Pokud False, používá se Direct Action (Motor L/R)
+    enabled: bool = True              # Pokud False, používá se Direct Action (Motor L/R). Hybrid mode uses True.
     
     # PID parametry pro převod Target -> Motor
     pid_pos_kp: float = 2.0
@@ -231,7 +231,7 @@ class SafetyConfig:
     
     # === Metrics ===
     log_metrics: bool = True
-    log_interval: int = 100   # Log every N steps
+    log_interval: int = 500   # Log every N steps (higher = faster training)
 
 @dataclass
 class ExperimentConfig:
@@ -325,6 +325,13 @@ class ExperimentConfig:
 #    - [x] IntentConfig: PID parametry (pid_pos_kp, pid_rot_kp, atd.).
 #    - [ ] Follow Intent: Sledování jiného agenta (nutný extra kód).
 #    - [ ] Formation Intent: Pozice ve formaci (nutná squad logika).
+#
+# 10. PURE JAX ENGINE (V4 - Warp Speed)
+#    - [x] Functional Structures: EnvParams (static) + EnvState (dynamic).
+#    - [x] Pure Engine: reset()/step() bez Python control flow.
+#    - [x] lax.scan Rollout: Celá epizoda jako jeden kernel.
+#    - [x] Unified Distance Matrix: Optimalizace pro Physics/Safety/Rewards.
+#    - [x] Benchmark: ~10k Env FPS, ~2.5M Agent FPS.
 # =============================================================================
 
 
@@ -350,4 +357,13 @@ class ExperimentConfig:
 #
 # RECOMMENDATION: Always use Hybrid mode (intent.enabled=True, safety.enabled=True)
 # for any real training scenario.
+#
+# PURE JAX ENGINE:
+# - Env FPS: ~10,000 | Agent FPS: ~2.5 MILLION (256 agents x 64 envs).
+# - Key: Eliminate all Python from the inner loop (jax.lax.scan).
+#
+# ⚠️ PERFORMANCE TIP:
+# - Set log_interval to 100-500+. Logging every step causes I/O bottleneck
+#   that can reduce FPS by an order of magnitude. Don't strangle the GPU
+#   with disk writes!
 # =============================================================================

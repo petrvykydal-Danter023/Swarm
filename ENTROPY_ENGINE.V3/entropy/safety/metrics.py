@@ -1,11 +1,11 @@
 import jax
 import jax.numpy as jnp
-from dataclasses import dataclass
-from typing import Dict
+from flax import struct
+from typing import Dict, Any
 from entropy.core.world import WorldState
 from entropy.config import SafetyConfig
 
-@dataclass
+@struct.dataclass
 class SafetyMetrics:
     """Metriky pro monitoring Safety Layer."""
     

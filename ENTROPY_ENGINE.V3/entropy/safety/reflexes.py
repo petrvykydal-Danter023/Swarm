@@ -8,7 +8,8 @@ from entropy.config import SafetyConfig
 def apply_collision_reflex(
     state: WorldState,
     raw_actions: jnp.ndarray,  # [N, ActionDim] from AI
-    config: SafetyConfig
+    config: SafetyConfig,
+    dist_matrix: jnp.ndarray = None # OPTIMIZATION: Unified Distance Matrix
 ) -> jnp.ndarray:
     """
     Modifikuje akce AI tak, aby se zabránilo kolizím.
@@ -17,6 +18,7 @@ def apply_collision_reflex(
     - Squad-aware: Neodpuzuje agenty ve stejném squadu (formace fungují!)
     - Lokální radius: Pro velké swarmy počítá jen blízké sousedy
     - JIT-safe: Používá jax.lax.cond místo Python if
+    - Unified Dist Matrix: Pokud je zadána, nepočítá znova.
     
     Logika:
     1. Spočítej vzdálenosti k nejbližším překážkám (agenti + zdi)
@@ -27,8 +29,13 @@ def apply_collision_reflex(
     pos = state.agent_positions
     
     # ========== 1. Agent-Agent Distances [N, N] ==========
-    dists = jnp.linalg.norm(pos[:, None, :] - pos[None, :, :], axis=-1)
-    dists = dists + jnp.eye(N) * 1e9  # Ignore self
+    if dist_matrix is None:
+        dists = jnp.linalg.norm(pos[:, None, :] - pos[None, :, :], axis=-1)
+    else:
+        dists = dist_matrix
+        
+    # Ensure self-distance is ignored (safe even if pre-computed has 0)
+    dists = dists + jnp.eye(N) * 1e9
     
     # ========== 2. SQUAD-AWARE FILTERING ==========
     # Neodpuzuj členy stejného squadu → formace zůstanou intaktní
