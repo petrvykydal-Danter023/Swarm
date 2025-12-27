@@ -52,8 +52,10 @@ def rollout_fn(rng, params):
         actions = jax.random.uniform(act_key, (BATCH_SIZE, NUM_AGENTS, 5), minval=-1.0, maxval=1.0)
         
         # Vmapped Step
-        batch_step = jax.vmap(PureEntropyEngine.step, in_axes=(0, 0, 0, None))
-        step_result = batch_step(step_keys, state, actions, params)
+        # in_axes: (rng, state, action, params, progress)
+        # progress is broadcasted (None)
+        batch_step = jax.vmap(PureEntropyEngine.step, in_axes=(0, 0, 0, None, None))
+        step_result = batch_step(step_keys, state, actions, params, 0.0)
         
         return (rng, step_result.state), None # We don't save outputs for speed test, just state transition
     
@@ -66,7 +68,8 @@ params = EnvParams(
     num_agents=NUM_AGENTS, 
     use_comms=True, 
     safety_enabled=True,
-    lidar_rays=32
+    lidar_rays=32,
+    action_dim=5
 )
 key = jax.random.PRNGKey(42)
 

@@ -26,6 +26,7 @@ class EnvParams:
     lidar_rays: int = 32
     lidar_range: float = 200.0
     agent_radius: float = 10.0
+    action_dim: int = 2 # Dimension of action vector
     
     # === COMMUNICATION ===
     use_comms: bool = False
@@ -38,15 +39,21 @@ class EnvParams:
     collision_reflex: bool = True
     monitor_metrics: bool = True
     
-    # === REWARDS ===
+    # === REWARD HYPERPARAMETERS (Universal System) ===
+    gamma: float = 0.99
     w_dist: float = 1.0
-    w_reach: float = 10.0
-    w_collision: float = -1.0
-    w_living_penalty: float = -0.001
+    w_reach: float = 200.0 # Sparse reward magnitude
+    w_energy: float = 0.01
+    w_smooth: float = 0.1
+    w_collision: float = 10.0
+    w_living_penalty: float = -0.01
+    
+    # === TASKS ===
+    task_id: int = 0            # 0=Nav, 1=Search, 2=Push
+    target_radius: float = 5.0
     
     # === HOG ===
-    hog_density: float = 0.0 # Placeholder for HOG integration param? 
-                             # Actually HOG weight is dynamic per step, not static param.
+    hog_density: float = 0.0
 
 @struct.dataclass
 class EnvState:
@@ -54,22 +61,38 @@ class EnvState:
     Dynamic container for the environment.
     Passed between pure function steps.
     """
+    # === KINEMATICS ===
     world: WorldState
+    
+    # === HISTORY (For PBRS & Smoothness) ===
+    prev_pos: jnp.ndarray     # [N, 2]
+    prev_action: jnp.ndarray  # [N, 2] (Differential drive commands)
+    
+    # === TASK SPECIFIC ===
+    # Stores [N, 2] for flexible per-agent target assignment
+    target: jnp.ndarray       # [N, 2]
+    
+    # Optional Push Task fields
+    box_pos: jnp.ndarray      # [1, 2]
+    prev_box_pos: jnp.ndarray # [1, 2]
+    
+    # Optional Search Task fields
+    target_visible: jnp.ndarray # [N, 1] 0.0 or 1.0
+    
+    # === META & RNG ===
     rng: jnp.ndarray
     step_count: int
     
     # Safety Metrics (Aggregated)
-    # We store them here to carry over steps
     safety_metrics: SafetyMetrics
     
     @property
     def done(self) -> bool:
         # Check if max steps reached
-        return self.step_count >= self.world.max_steps # Assuming world stores max_steps or we use params
-        # Wait, max_steps is in Params usually.
-        # But for 'done' property convenience, we might need access. 
-        # Better to compute 'done' in the step function.
-        pass
+        # Note: We need access to params.max_steps to be accurate here, 
+        # but this property is mostly for debug/convenience outside of JIT.
+        # Inside JIT, use explicit done flag returned by step.
+        return False
 
 @struct.dataclass
 class EnvStep:
@@ -78,6 +101,6 @@ class EnvStep:
     """
     obs: jnp.ndarray
     state: EnvState
-    reward: jnp.ndarray # [N] (or scalar if shared)
-    done: jnp.ndarray   # [N] (or scalar)
-    info: Any # Dict-like struct or just jnp array of metrics
+    reward: jnp.ndarray # [N]
+    done: jnp.ndarray   # [N] boolean
+    info: Any # Dict-like struct or metric array
