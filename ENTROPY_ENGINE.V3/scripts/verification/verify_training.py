@@ -1,3 +1,6 @@
+import sys
+import os
+sys.path.append(os.path.join(os.path.dirname(__file__), '../../'))
 """
 Verification Script for Phase 5: Training
 Runs a short PPO training loop to verify JIT compilation and execution.

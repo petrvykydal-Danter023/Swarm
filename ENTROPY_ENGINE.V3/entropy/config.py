@@ -359,11 +359,13 @@ class ExperimentConfig:
 # for any real training scenario.
 #
 # PURE JAX ENGINE:
-# - Env FPS: ~10,000 | Agent FPS: ~2.5 MILLION (256 agents x 64 envs).
+# - Env FPS (CPU): ~10,000 | Agent FPS: ~2.5 MILLION (256 agents x 64 envs).
+# - Env FPS (GPU): ~259,000 | Agent FPS: ~66.3 MILLION (256 agents x 64 envs).
 # - Key: Eliminate all Python from the inner loop (jax.lax.scan).
 #
 # ⚠️ PERFORMANCE TIP:
 # - Set log_interval to 100-500+. Logging every step causes I/O bottleneck
 #   that can reduce FPS by an order of magnitude. Don't strangle the GPU
 #   with disk writes!
+# - Hand of God (HOG) will slow down training when running on GPU.
 # =============================================================================

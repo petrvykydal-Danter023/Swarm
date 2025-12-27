@@ -1,3 +1,6 @@
+import sys
+import os
+sys.path.append(os.path.join(os.path.dirname(__file__), '../../'))
 """
 Entropy Engine V3 - Main Training Script
 Entry point for training experiments using Hydra configuration.

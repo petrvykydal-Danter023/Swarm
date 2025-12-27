@@ -1,3 +1,6 @@
+import sys
+import os
+sys.path.append(os.path.join(os.path.dirname(__file__), '../../'))
 """
 Manual Verification for Phase 4: Rendering
 Run this script to start a fake simulation server.
