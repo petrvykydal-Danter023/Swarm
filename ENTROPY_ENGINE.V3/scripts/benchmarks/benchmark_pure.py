@@ -17,7 +17,7 @@ NUM_AGENTS = 256 # Massive swarm
 NUM_STEPS = 200  # Full episode
 BATCH_SIZE = 1   # Single Environment for raw kernel speed (or batch it)
 # Let's batch to simulate training
-BATCH_SIZE = 64 
+BATCH_SIZE = 4 # Reduced from 64 to 4 to prevent OOM on smaller GPUs/Avoid CPU freeze 
 
 print(f"🚀 Benchmarking Pure JAX Engine...")
 print(f"Agents: {NUM_AGENTS}")

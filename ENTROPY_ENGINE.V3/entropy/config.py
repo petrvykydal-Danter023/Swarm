@@ -93,6 +93,7 @@ class RewardConfig:
     """
     Nastavení Váh Odměn (Reward Shaping).
     Určuje, co je pro agenty "dobré" a "špatné".
+    Synchronizováno s Universal Reward System (JAX).
     """
     # 1. Vzdálenost k cíli (Dense Reward)
     # Motivuje k pohybu směrem k cíli.
@@ -101,7 +102,7 @@ class RewardConfig:
     
     # 2. Dosažení cíle (Sparse Reward)
     # Velký bonus za dotknutí se cíle.
-    w_reach: float = 10.0
+    w_reach: float = 200.0 
     
     # 3. Penalizace za energii (Motor usage)
     # Motivuje k efektivnímu pohybu (neplýtvat palivem).
@@ -111,9 +112,21 @@ class RewardConfig:
     # 4. Living Penalty (Time pressure)
     # Malá penalizace za každý krok, kdy agent NENÍ v cíli.
     # Zabraňuje strategii "stůj a šetři energii".
-    w_living_penalty: float = -0.001
+    w_living_penalty: float = -0.01 
     
-    # 5. Sdílení cíle (Shared Goal)
+    # 5. Smooth Action Penalty (Jerk)
+    # Penalizace za prudké změny akcí (škubání).
+    w_smooth: float = 0.1
+    
+    # 6. Collision Penalty (Hard)
+    # Penalizace za srážku s jiným agentem.
+    w_collision: float = 10.0
+    
+    # --- TASKS ---
+    task_id: int = 0  # 0=Nav, 1=Search, 2=Push
+    target_radius: float = 5.0
+    
+    # 7. Sdílení cíle (Shared Goal)
     # True = Všichni agenti mají jeden společný cíl (Flocking).
     # False = Každý má svůj unikátní cíl (Routing/Traffic).
     shared_goal: bool = False
@@ -279,7 +292,7 @@ class ExperimentConfig:
 #    - [x] Pohyb (Continuous): Tank-drive [Levý_Motor, Pravý_Motor] nebo [Speed, Rotate].
 #    - [x] Komunikace (Complex): 
 #          - Broadcast: Všesměrové vysílání.
-#          - Spatial: Cílené vysílání na souřadnice (Angle/Dist).
+#          - Spatial: Cílené vysílání na souřadnice (Angle, Dist).
 #          - Gating: Možnost mlčet (šetří penalizaci).
 #    - [ ] Manipulace: Chytání objektů (Gripper) - plánováno pro V4.
 #
@@ -294,6 +307,7 @@ class ExperimentConfig:
 #    - [x] Paměť: GRU (Recurrent Actor) pro udržení kontextu (Telepatie).
 #    - [x] Hand of God: Expertní navigace (vektorová pole) pro guiding.
 #    - [x] Curriculum: Postupné ztěžování (HOG decay, Spam penalty ramp-up).
+#    - [x] Universal Reward System: PBRS + Smoothness + Collision Penalties.
 #    - [x] Massive Parallelism: JAX VMAP (64+ vesmírů naráz).
 #    - [x] Checkpointing: Ukládání/Načítání stavu sítě a optimizéru.
 #
@@ -362,6 +376,12 @@ class ExperimentConfig:
 # - Env FPS (CPU): ~10,000 | Agent FPS: ~2.5 MILLION (256 agents x 64 envs).
 # - Env FPS (GPU): ~259,000 | Agent FPS: ~66.3 MILLION (256 agents x 64 envs).
 # - Key: Eliminate all Python from the inner loop (jax.lax.scan).
+#
+# UNIVERSAL REWARD SYSTEM (JAX):
+# - Best Use: Use PBRS (Potential-Based Reward Shaping) to allow agent to learn complex paths
+#   without getting stuck in local optima (e.g. circular movement).
+# - Zero-Overhead: Switching tasks (Nav -> Push) adds NO computational cost thanks to jax.lax.switch.
+# - Smoothness: Always keep w_smooth > 0.0 to prevent high-frequency jitter in motors.
 #
 # ⚠️ PERFORMANCE TIP:
 # - Set log_interval to 100-500+. Logging every step causes I/O bottleneck
